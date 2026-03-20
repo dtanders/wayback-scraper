@@ -36,6 +36,8 @@ wayback-scraper <URL> <OUTPUT> [OPTIONS]
 | `OUTPUT` | Directory to write files into (created if absent) |
 | `--verbose` / `-v` | Print a line for every request |
 | `--include-exact-copies` | Save a full copy of every file even when content is identical to an earlier timestamp; disables hard-link deduplication |
+| `--after TIMESTAMP` | Only download snapshots at or after this timestamp (e.g. `20100101`) |
+| `--before TIMESTAMP` | Only download snapshots at or before this timestamp (e.g. `20101231235959`) |
 
 ## Build
 
