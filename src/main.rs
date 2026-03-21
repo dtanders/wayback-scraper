@@ -519,6 +519,23 @@ async fn fetch_cdx_page(
     Ok(page)
 }
 
+// ─── Formatting helpers ───────────────────────────────────────────────────────
+
+fn format_bytes(n: u64) -> String {
+    const KB: u64 = 1_024;
+    const MB: u64 = 1_024 * KB;
+    const GB: u64 = 1_024 * MB;
+    if n >= GB {
+        format!("{:.1} GB", n as f64 / GB as f64)
+    } else if n >= MB {
+        format!("{:.1} MB", n as f64 / MB as f64)
+    } else if n >= KB {
+        format!("{:.1} KB", n as f64 / KB as f64)
+    } else {
+        format!("{n} B")
+    }
+}
+
 // ─── Content hashing ──────────────────────────────────────────────────────────
 
 fn hash_bytes(bytes: &[u8]) -> u64 {
@@ -611,8 +628,8 @@ enum SnapshotOutcome {
     /// Got a non-success HTTP response — a network request was made.
     Skipped,
     /// Content matched an earlier timestamp; a hard link was created instead of
-    /// a new copy.  Raw bytes returned for link extraction.
-    Hardlinked(Vec<u8>),
+    /// a new copy.  Raw bytes returned for link extraction; u64 is bytes saved.
+    Hardlinked(Vec<u8>, u64),
     /// All retries were exhausted due to a connection error (IP block).
     Blocked,
 }
@@ -742,7 +759,7 @@ async fn download_snapshot(
                         if verbose {
                             log!("[LINKED] {} -> {}", dest.display(), src.display());
                         }
-                        return Ok(SnapshotOutcome::Hardlinked(raw));
+                        return Ok(SnapshotOutcome::Hardlinked(raw, final_bytes.len() as u64));
                     }
                     Err(e) => {
                         // Fallback: different volume or unsupported filesystem.
@@ -765,9 +782,9 @@ async fn download_snapshot(
 
     if verbose {
         log!(
-            "[{status}] [SAVED] {} ({} bytes)",
+            "[{status}] [SAVED] {} ({})",
             dest.display(),
-            final_bytes.len()
+            format_bytes(final_bytes.len() as u64)
         );
     }
 
@@ -844,6 +861,8 @@ async fn main() -> Result<()> {
     let mut skipped: usize = 0;
     let mut errors: usize = 0;
     let mut discovered: usize = 0;
+    let mut total_bytes: u64 = 0;
+    let mut total_saved: u64 = 0;
     let mut consecutive_blocks: u32 = 0;
 
     loop {
@@ -936,6 +955,8 @@ async fn main() -> Result<()> {
             let mut ts_err = 0usize;
             let mut ts_disc = 0usize;
             let mut ts_processed = 0usize;
+            let mut ts_bytes = 0u64;
+            let mut ts_saved = 0u64;
 
             if !args.verbose {
                 log!("[ts {ts_done}] {timestamp}  ({} CDX URLs)", queue.len());
@@ -989,6 +1010,7 @@ async fn main() -> Result<()> {
                     Ok(SnapshotOutcome::Downloaded(bytes)) => {
                         consecutive_blocks = 0;
                         ts_dl += 1;
+                        ts_bytes += bytes.len() as u64;
                         enqueue_links(&bytes);
                         sleep(Duration::from_millis(REQUEST_DELAY_MS)).await;
                     }
@@ -998,9 +1020,10 @@ async fn main() -> Result<()> {
                         enqueue_links(&bytes);
                         // No network request — no delay needed.
                     }
-                    Ok(SnapshotOutcome::Hardlinked(bytes)) => {
+                    Ok(SnapshotOutcome::Hardlinked(bytes, saved)) => {
                         consecutive_blocks = 0;
                         ts_linked += 1;
+                        ts_saved += saved;
                         enqueue_links(&bytes);
                         sleep(Duration::from_millis(REQUEST_DELAY_MS)).await;
                     }
@@ -1044,6 +1067,8 @@ async fn main() -> Result<()> {
             skipped += ts_skip;
             errors += ts_err;
             discovered += ts_disc;
+            total_bytes += ts_bytes;
+            total_saved += ts_saved;
 
             if !args.verbose {
                 log!(
@@ -1063,7 +1088,10 @@ async fn main() -> Result<()> {
     eprintln!();
     log!(
         "Done.  timestamps={ts_done}  cdx={cdx_count}  discovered={discovered}  \
-         downloaded={downloaded}  linked={linked}  skipped={skipped}  errors={errors}"
+         downloaded={downloaded}  linked={linked}  skipped={skipped}  errors={errors}  \
+         bytes={}  saved={}",
+        format_bytes(total_bytes),
+        format_bytes(total_saved)
     );
 
     Ok(())
