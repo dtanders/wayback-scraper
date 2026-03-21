@@ -1,17 +1,10 @@
 # wayback-scraper
 
-Downloads locally browsable snapshots of a website from the [Internet Archive Wayback Machine](https://web.archive.org/).
+We (can) have the internet archives at home!
 
 ## What it does
 
-1. Queries the CDX API for every archived snapshot of the target domain (including subdomains).
-2. Processes snapshots oldest-first, fully completing each timestamp before moving to the next.
-3. For each snapshot, downloads all captured files and follows links in HTML pages to discover additional same-domain resources.
-4. Rewrites internal URLs in HTML and CSS to relative local paths so snapshots are browsable without a web server.
-5. Strips the Wayback Machine JS banner injected into archived HTML pages.
-6. Skips files already on disk — runs are resumable.
-
-Output layout:
+Downloads every archived snapshot of a domain from the [Internet Archive Wayback Machine](https://web.archive.org/) into a locally browsable directory tree, one subdirectory per timestamp:
 
 ```
 <OUTPUT>/
@@ -48,12 +41,16 @@ cargo build --release
 
 Requires Rust 1.80+ (uses `std::sync::LazyLock`).
 
-## Behaviour
+## Behavior
 
+- **Snapshot ordering**: Snapshots are processed oldest-first; each timestamp is fully completed before moving to the next.
+- **Link following**: HTML pages are crawled for links to additional same-domain resources not listed in the CDX index.
+- **URL rewriting**: Internal URLs in HTML and CSS are rewritten to relative local paths so snapshots are browsable offline without a web server.
+- **Banner stripping**: The Wayback Machine JS toolbar injected into archived HTML is removed.
+- **Domain matching**: `www.example.com` and `example.com` are treated as the same site; all subdomains are included.
 - **Rate limit**: ~2 requests per second to archive.org.
 - **Retries**: Up to 4 retries on connection/timeout errors with exponential backoff (5 s → 10 s → 20 s → 40 s).
 - **Circuit breaker**: Aborts after 5 consecutive exhausted retries, indicating a sustained IP block.
 - **CDX cache**: The CDX index is saved to `<OUTPUT>/.wayback-scraper/cdx_<domain>.json` as each page is fetched. Subsequent runs load from this cache instead of re-querying the API.
-- **Deduplication**: When a file's content is identical to an earlier timestamp's copy, a hard link is created instead of saving a new copy, saving disk space. Pass `--include-exact-copies` to disable this and always write independent files.
 - **Resumable**: Already-downloaded files are skipped. Re-running on the same output directory picks up where it left off and re-crawls cached HTML pages for new links.
-- **Domain matching**: `www.example.com` and `example.com` are treated as the same site; all subdomains are included.
+- **Deduplication**: When a file's content is identical to an earlier timestamp's copy, a hard link is created instead of saving a new copy, saving disk space. Pass `--include-exact-copies` to disable this and always write independent files.
