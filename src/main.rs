@@ -720,7 +720,7 @@ async fn download_snapshot(
     let status = resp.status();
 
     if !status.is_success() {
-        log!("[{status}] {orig_url}");
+        log!("[{status}] {wayback_url}");
         return Ok(SnapshotOutcome::Skipped);
     }
 
