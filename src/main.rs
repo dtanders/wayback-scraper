@@ -24,15 +24,20 @@ use url::Url;
 const WAYBACK_CDX: &str = "https://web.archive.org/cdx/search/cdx";
 const WAYBACK_WEB: &str = "https://web.archive.org/web";
 
-/// 2 requests / second — polite default for archive.org.
-const REQUEST_DELAY_MS: u64 = 500;
+/// Minimum inter-request delay (4 requests / second).  The actual delay
+/// grows automatically when archive.org starts throttling and decays back
+/// to this floor once requests succeed again.
+const MIN_REQUEST_DELAY_MS: u64 = 250;
+
+/// Maximum inter-request delay the adaptive throttle will reach.
+const MAX_REQUEST_DELAY_MS: u64 = 4_000;
 
 /// Retry up to this many times on transient connection errors.
 const MAX_RETRIES: u32 = 4;
 
-/// First retry waits this long; each subsequent retry doubles it.
-/// 5 s → 10 s → 20 s → 40 s
-const RETRY_BASE_MS: u64 = 5_000;
+/// First retry waits this long; each subsequent retry is 1.5× the previous.
+/// 2 s → 3 s → 4.5 s → 6.75 s
+const RETRY_BASE_MS: u64 = 2_000;
 
 /// Abort the run if this many consecutive requests exhaust all retries.
 /// Indicates a sustained IP block rather than isolated failures.
@@ -68,7 +73,7 @@ links rewritten to relative paths so they work without a web server.  After \
 each HTML page is saved, its links are parsed and any same-domain resources \
 not already queued are fetched at the same snapshot timestamp.\n\n\
 Already-downloaded files are skipped.  Requests to archive.org are \
-rate-limited to roughly two per second."
+rate-limited to roughly four per second, backing off automatically if throttled."
 )]
 struct Args {
     /// URL of the site to archive (e.g. https://example.com)
@@ -168,7 +173,7 @@ fn url_to_local_str(url_str: &str) -> Option<String> {
     let parts: Vec<String> = raw
         .split('/')
         .filter(|s| !s.is_empty() && *s != "." && *s != "..")
-        .map(|s| sanitize_component(s))
+        .map(sanitize_component)
         .collect();
 
     if raw.ends_with('/') || parts.is_empty() {
@@ -408,7 +413,7 @@ fn extract_links(content: &[u8], base_url: &str, apex: &str) -> Vec<String> {
                         } else if let Some(ref b) = base {
                             // Unwrap after resolution: catches relative embedded Wayback paths.
                             match b.join(&raw) {
-                                Ok(u) => unwrap_wayback(&u.to_string()),
+                                Ok(u) => unwrap_wayback(u.as_ref()),
                                 Err(_) => continue,
                             }
                         } else {
@@ -478,7 +483,7 @@ async fn fetch_cdx_page(
                 Ok(r) => break r,
                 Err(e) if attempt < MAX_RETRIES && (e.is_connect() || e.is_timeout()) => {
                     attempt += 1;
-                    let delay_ms = RETRY_BASE_MS * (1 << (attempt - 1));
+                    let delay_ms = (RETRY_BASE_MS as f64 * 1.5f64.powi(attempt as i32 - 1)) as u64;
                     log!("[CDX RETRY {attempt}/{MAX_RETRIES}] {e} — waiting {delay_ms}ms");
                     sleep(Duration::from_millis(delay_ms)).await;
                 }
@@ -636,11 +641,12 @@ enum SnapshotOutcome {
 
 /// Fetch a single Wayback snapshot, rewrite internal URLs to relative local
 /// paths, and write the result to `output/<ts>/<rel_path>`.
+#[allow(clippy::too_many_arguments)]
 async fn download_snapshot(
     client: &Client,
     timestamp: &str,
     orig_url: &str,
-    output: &PathBuf,
+    output: &Path,
     apex: &str,
     verbose: bool,
     dedup: bool,
@@ -688,7 +694,7 @@ async fn download_snapshot(
                 Ok(r) => break r,
                 Err(e) if attempt < MAX_RETRIES && (e.is_connect() || e.is_timeout()) => {
                     attempt += 1;
-                    let delay_ms = RETRY_BASE_MS * (1 << (attempt - 1));
+                    let delay_ms = (RETRY_BASE_MS as f64 * 1.5f64.powi(attempt as i32 - 1)) as u64;
                     log!("[RETRY {attempt}/{MAX_RETRIES}] {orig_url} — {e} — waiting {delay_ms}ms");
                     sleep(Duration::from_millis(delay_ms)).await;
                 }
@@ -864,6 +870,8 @@ async fn main() -> Result<()> {
     let mut total_bytes: u64 = 0;
     let mut total_saved: u64 = 0;
     let mut consecutive_blocks: u32 = 0;
+    // Adaptive inter-request delay.  Bumps up on throttling, decays on success.
+    let mut current_delay_ms: u64 = MIN_REQUEST_DELAY_MS;
 
     loop {
         // Obtain the next batch of CDX entries.
@@ -1009,10 +1017,12 @@ async fn main() -> Result<()> {
                 {
                     Ok(SnapshotOutcome::Downloaded(bytes)) => {
                         consecutive_blocks = 0;
+                        current_delay_ms =
+                            (current_delay_ms.saturating_sub(25)).max(MIN_REQUEST_DELAY_MS);
                         ts_dl += 1;
                         ts_bytes += bytes.len() as u64;
                         enqueue_links(&bytes);
-                        sleep(Duration::from_millis(REQUEST_DELAY_MS)).await;
+                        sleep(Duration::from_millis(current_delay_ms)).await;
                     }
                     Ok(SnapshotOutcome::CachedHtml(bytes)) => {
                         consecutive_blocks = 0;
@@ -1022,38 +1032,45 @@ async fn main() -> Result<()> {
                     }
                     Ok(SnapshotOutcome::Hardlinked(bytes, saved)) => {
                         consecutive_blocks = 0;
+                        current_delay_ms =
+                            (current_delay_ms.saturating_sub(25)).max(MIN_REQUEST_DELAY_MS);
                         ts_linked += 1;
                         ts_saved += saved;
                         enqueue_links(&bytes);
-                        sleep(Duration::from_millis(REQUEST_DELAY_MS)).await;
+                        sleep(Duration::from_millis(current_delay_ms)).await;
                     }
                     Ok(SnapshotOutcome::SkippedLocal) => {
                         ts_skip += 1;
                     }
                     Ok(SnapshotOutcome::Skipped) => {
                         consecutive_blocks = 0;
+                        current_delay_ms =
+                            (current_delay_ms.saturating_sub(25)).max(MIN_REQUEST_DELAY_MS);
                         ts_skip += 1;
-                        sleep(Duration::from_millis(REQUEST_DELAY_MS)).await;
+                        sleep(Duration::from_millis(current_delay_ms)).await;
                     }
                     Ok(SnapshotOutcome::Blocked) => {
                         consecutive_blocks += 1;
                         ts_err += 1;
+                        current_delay_ms = (current_delay_ms * 2).min(MAX_REQUEST_DELAY_MS);
+                        log!("[THROTTLE] backing off to {current_delay_ms}ms inter-request delay");
                         if consecutive_blocks >= CIRCUIT_BREAKER_THRESHOLD {
                             log!(
                                 "[CIRCUIT BREAKER] {consecutive_blocks} consecutive blocks — aborting run"
                             );
                             std::process::exit(1);
                         }
-                        sleep(Duration::from_millis(REQUEST_DELAY_MS)).await;
+                        sleep(Duration::from_millis(current_delay_ms)).await;
                     }
                     Err(e) => {
                         ts_err += 1;
+                        current_delay_ms = (current_delay_ms * 2).min(MAX_REQUEST_DELAY_MS);
                         log!("[ERROR] {orig_url}: {e:#}");
-                        sleep(Duration::from_millis(REQUEST_DELAY_MS)).await;
+                        sleep(Duration::from_millis(current_delay_ms)).await;
                     }
                 }
 
-                if !args.verbose && ts_processed % 50 == 0 {
+                if !args.verbose && ts_processed.is_multiple_of(50) {
                     log!(
                         "  … {ts_processed} processed, {} queued  \
                         dl={ts_dl} linked={ts_linked} skip={ts_skip} err={ts_err} disc={ts_disc}",
@@ -1082,7 +1099,7 @@ async fn main() -> Result<()> {
         }
 
         offset += CDX_PAGE_SIZE;
-        sleep(Duration::from_millis(REQUEST_DELAY_MS)).await;
+        sleep(Duration::from_millis(MIN_REQUEST_DELAY_MS)).await;
     } // end CDX page loop
 
     eprintln!();
