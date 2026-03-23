@@ -48,8 +48,8 @@ Requires Rust 1.80+ (uses `std::sync::LazyLock`).
 - **URL rewriting**: Internal URLs in HTML and CSS are rewritten to relative local paths so snapshots are browsable offline without a web server.
 - **Banner stripping**: The Wayback Machine JS toolbar injected into archived HTML is removed.
 - **Domain matching**: `www.example.com` and `example.com` are treated as the same site; all subdomains are included.
-- **Rate limit**: ~2 requests per second to archive.org.
-- **Retries**: Up to 4 retries on connection/timeout errors with exponential backoff (5 s → 10 s → 20 s → 40 s).
+- **Rate limit**: ~4 requests per second to archive.org by default.  The inter-request delay starts at 250 ms and doubles (up to 4 s) each time a request is blocked, then decays back to 250 ms as requests succeed.
+- **Retries**: Up to 4 retries on connection/timeout errors with exponential backoff (2 s → 3 s → 4.5 s → 6.75 s).
 - **Circuit breaker**: Aborts after 5 consecutive exhausted retries, indicating a sustained IP block.
 - **CDX cache**: The CDX index is saved to `<OUTPUT>/.wayback-scraper/cdx_<domain>.json` as each page is fetched. Subsequent runs load from this cache instead of re-querying the API.
 - **Resumable**: Already-downloaded files are skipped. Re-running on the same output directory picks up where it left off and re-crawls cached HTML pages for new links.
