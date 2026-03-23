@@ -32,6 +32,9 @@ const MIN_REQUEST_DELAY_MS: u64 = 250;
 /// Maximum inter-request delay the adaptive throttle will reach.
 const MAX_REQUEST_DELAY_MS: u64 = 4_000;
 
+/// Nominal request rate derived from the minimum delay.
+const REQUEST_RATE: u64 = 1_000 / MIN_REQUEST_DELAY_MS;
+
 /// Retry up to this many times on transient connection errors.
 const MAX_RETRIES: u32 = 4;
 
@@ -58,12 +61,10 @@ static WAYBACK_RE: LazyLock<Regex> =
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
-#[derive(Parser, Debug)]
-#[command(
-    name = "wayback-scraper",
-    about = "Create locally browsable snapshots of a site from the Internet Archive",
-    long_about = "\
-Queries the Wayback Machine CDX API for every snapshot of <URL> (including \
+// long_about is built at runtime in main() so it can reference REQUEST_RATE.
+static LONG_ABOUT: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "Queries the Wayback Machine CDX API for every snapshot of <URL> (including \
 subdomains), downloads each captured file, rewrites internal URLs to relative \
 local paths, and stores everything under <OUTPUT> as:\n\n  \
   <OUTPUT>/<YYYYMMDDHHMMSS>/<url-path>\n\n\
@@ -73,7 +74,14 @@ links rewritten to relative paths so they work without a web server.  After \
 each HTML page is saved, its links are parsed and any same-domain resources \
 not already queued are fetched at the same snapshot timestamp.\n\n\
 Already-downloaded files are skipped.  Requests to archive.org are \
-rate-limited to roughly four per second, backing off automatically if throttled."
+rate-limited to roughly {REQUEST_RATE} per second, backing off automatically if throttled."
+    )
+});
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "wayback-scraper",
+    about = "Create locally browsable snapshots of a site from the Internet Archive"
 )]
 struct Args {
     /// URL of the site to archive (e.g. https://example.com)
@@ -803,7 +811,11 @@ async fn download_snapshot(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let args = {
+        use clap::{CommandFactory, FromArgMatches};
+        let cmd = Args::command().long_about(LONG_ABOUT.as_str());
+        Args::from_arg_matches(&cmd.get_matches()).unwrap()
+    };
 
     let apex = apex_from_url(&args.url)?;
     log!("Domain  : {apex}  (subdomains included)");
@@ -814,7 +826,7 @@ async fn main() -> Result<()> {
     if let Some(ts) = &args.before {
         log!("Before  : {ts}");
     }
-    log!("Rate    : ~2 requests / second");
+    log!("Rate    : ~{REQUEST_RATE} requests / second");
     eprintln!();
 
     fs::create_dir_all(&args.output).with_context(|| {
