@@ -660,6 +660,7 @@ async fn download_snapshot(
     dedup: bool,
     memo: &mut HashMap<String, (PathBuf, u64)>,
     existing: &mut HashSet<PathBuf>,
+    failed_urls: &mut HashSet<String>,
 ) -> Result<SnapshotOutcome> {
     let rel = url_to_rel_path(orig_url);
     // Forward-slash version used for URL arithmetic inside rewriting.
@@ -689,6 +690,10 @@ async fn download_snapshot(
 
     // `if_` tells Wayback to return raw content without toolbar injection.
     let wayback_url = format!("{WAYBACK_WEB}/{timestamp}if_/{orig_url}");
+
+    if failed_urls.contains(&wayback_url) {
+        return Ok(SnapshotOutcome::SkippedLocal);
+    }
 
     if verbose {
         log!("[FETCH] {wayback_url}");
@@ -721,6 +726,9 @@ async fn download_snapshot(
 
     if !status.is_success() {
         log!("[{status}] {wayback_url}");
+        if status.is_client_error() {
+            failed_urls.insert(wayback_url);
+        }
         return Ok(SnapshotOutcome::Skipped);
     }
 
@@ -884,6 +892,8 @@ async fn main() -> Result<()> {
     let mut consecutive_blocks: u32 = 0;
     // Adaptive inter-request delay.  Bumps up on throttling, decays on success.
     let mut current_delay_ms: u64 = MIN_REQUEST_DELAY_MS;
+    // 4XX responses cached for the session — same Wayback URL won't be re-fetched.
+    let mut failed_urls: HashSet<String> = HashSet::new();
 
     loop {
         // Obtain the next batch of CDX entries.
@@ -1024,6 +1034,7 @@ async fn main() -> Result<()> {
                     dedup,
                     &mut memo,
                     &mut existing,
+                    &mut failed_urls,
                 )
                 .await
                 {
@@ -1068,7 +1079,7 @@ async fn main() -> Result<()> {
                         log!("[THROTTLE] backing off to {current_delay_ms}ms inter-request delay");
                         if consecutive_blocks >= CIRCUIT_BREAKER_THRESHOLD {
                             log!(
-                                "[CIRCUIT BREAKER] {consecutive_blocks} consecutive blocks — aborting run"
+                                "[CIRCUIT BREAKER] {consecutive_blocks} consecutive blocks — aborting run in timestamp {timestamp}"
                             );
                             std::process::exit(1);
                         }
