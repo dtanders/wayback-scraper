@@ -50,7 +50,8 @@ Requires Rust 1.80+ (uses `std::sync::LazyLock`).
 - **Domain matching**: `www.example.com` and `example.com` are treated as the same site; all subdomains are included.
 - **Rate limit**: ~4 requests per second to archive.org by default.  The inter-request delay starts at 250 ms and doubles (up to 4 s) each time a request is blocked, then decays back to 250 ms as requests succeed.
 - **Retries**: Up to 4 retries on connection/timeout errors with exponential backoff (2 s → 3 s → 4.5 s → 6.75 s).
-- **Circuit breaker**: Aborts after 5 consecutive exhausted retries, indicating a sustained IP block.
+- **Circuit breaker**: After 5 consecutive exhausted-retry blocks, pauses for a cooldown (60 s, doubling on each trip) then resumes. Aborts only after 3 trips without recovery.
+- **4XX caching**: URLs that return a client error (404, 403, etc.) are skipped for the remainder of the session, avoiding redundant requests when the same broken URL is linked from multiple pages.
 - **CDX cache**: The CDX index is saved to `<OUTPUT>/.wayback-scraper/cdx_<domain>.json` as each page is fetched. Subsequent runs load from this cache instead of re-querying the API.
 - **Resumable**: Already-downloaded files are skipped. Re-running on the same output directory picks up where it left off and re-crawls cached HTML pages for new links.
 - **Deduplication**: When a file's content is identical to an earlier timestamp's copy, a hard link is created instead of saving a new copy, saving disk space. Pass `--include-exact-copies` to disable this and always write independent files.

@@ -42,9 +42,15 @@ const MAX_RETRIES: u32 = 4;
 /// 2 s → 3 s → 4.5 s → 6.75 s
 const RETRY_BASE_MS: u64 = 2_000;
 
-/// Abort the run if this many consecutive requests exhaust all retries.
-/// Indicates a sustained IP block rather than isolated failures.
+/// Open the circuit breaker after this many consecutive exhausted-retry blocks.
 const CIRCUIT_BREAKER_THRESHOLD: u32 = 5;
+
+/// How long to cool down when the circuit first opens; doubles on each trip.
+/// 60 s → 120 s → 240 s
+const CIRCUIT_BREAKER_COOLDOWN_MS: u64 = 60_000;
+
+/// Abort the run after the circuit opens this many times without recovery.
+const CIRCUIT_BREAKER_MAX_TRIPS: u32 = 3;
 
 /// CDX records per API page.
 const CDX_PAGE_SIZE: u32 = 10_000;
@@ -712,7 +718,7 @@ async fn download_snapshot(
                     sleep(Duration::from_millis(delay_ms)).await;
                 }
                 Err(e) if e.is_connect() || e.is_timeout() => {
-                    log!("[BLOCKED] {orig_url}");
+                    log!("[BLOCKED] {wayback_url}");
                     return Ok(SnapshotOutcome::Blocked);
                 }
                 Err(e) => {
@@ -890,6 +896,7 @@ async fn main() -> Result<()> {
     let mut total_bytes: u64 = 0;
     let mut total_saved: u64 = 0;
     let mut consecutive_blocks: u32 = 0;
+    let mut circuit_trips: u32 = 0;
     // Adaptive inter-request delay.  Bumps up on throttling, decays on success.
     let mut current_delay_ms: u64 = MIN_REQUEST_DELAY_MS;
     // 4XX responses cached for the session — same Wayback URL won't be re-fetched.
@@ -1078,12 +1085,26 @@ async fn main() -> Result<()> {
                         current_delay_ms = (current_delay_ms * 2).min(MAX_REQUEST_DELAY_MS);
                         log!("[THROTTLE] backing off to {current_delay_ms}ms inter-request delay");
                         if consecutive_blocks >= CIRCUIT_BREAKER_THRESHOLD {
+                            circuit_trips += 1;
+                            if circuit_trips >= CIRCUIT_BREAKER_MAX_TRIPS {
+                                log!(
+                                    "[CIRCUIT BREAKER] tripped {circuit_trips} times — aborting run at {timestamp}"
+                                );
+                                std::process::exit(1);
+                            }
+                            let cooldown_ms =
+                                CIRCUIT_BREAKER_COOLDOWN_MS * (1 << (circuit_trips - 1));
                             log!(
-                                "[CIRCUIT BREAKER] {consecutive_blocks} consecutive blocks — aborting run in timestamp {timestamp}"
+                                "[CIRCUIT BREAKER] trip {circuit_trips}/{CIRCUIT_BREAKER_MAX_TRIPS} \
+                                — cooling down for {}s",
+                                cooldown_ms / 1000
                             );
-                            std::process::exit(1);
+                            sleep(Duration::from_millis(cooldown_ms)).await;
+                            consecutive_blocks = 0;
+                            current_delay_ms = MIN_REQUEST_DELAY_MS;
+                        } else {
+                            sleep(Duration::from_millis(current_delay_ms)).await;
                         }
-                        sleep(Duration::from_millis(current_delay_ms)).await;
                     }
                     Err(e) => {
                         ts_err += 1;
