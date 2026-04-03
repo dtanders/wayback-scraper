@@ -644,8 +644,10 @@ enum SnapshotOutcome {
     CachedHtml(Vec<u8>),
     /// Already on disk (non-HTML) or is a directory — no network request made.
     SkippedLocal,
-    /// Got a non-success HTTP response — a network request was made.
+    /// Got a 4XX HTTP response — a network request was made.
     Skipped,
+    /// Got a 5XX HTTP response — server-side error or rate limit.
+    ServerError,
     /// Content matched an earlier timestamp; a hard link was created instead of
     /// a new copy.  Raw bytes returned for link extraction; u64 is bytes saved.
     Hardlinked(Vec<u8>, u64),
@@ -734,8 +736,10 @@ async fn download_snapshot(
         log!("[{status}] {wayback_url}");
         if status.is_client_error() {
             failed_urls.insert(wayback_url);
+            return Ok(SnapshotOutcome::Skipped);
+        } else {
+            return Ok(SnapshotOutcome::ServerError);
         }
-        return Ok(SnapshotOutcome::Skipped);
     }
 
     let content_type = resp
@@ -1079,7 +1083,7 @@ async fn main() -> Result<()> {
                         ts_skip += 1;
                         sleep(Duration::from_millis(current_delay_ms)).await;
                     }
-                    Ok(SnapshotOutcome::Blocked) => {
+                    Ok(SnapshotOutcome::Blocked | SnapshotOutcome::ServerError) => {
                         consecutive_blocks += 1;
                         ts_err += 1;
                         current_delay_ms = (current_delay_ms * 2).min(MAX_REQUEST_DELAY_MS);
@@ -1088,7 +1092,7 @@ async fn main() -> Result<()> {
                             circuit_trips += 1;
                             if circuit_trips >= CIRCUIT_BREAKER_MAX_TRIPS {
                                 log!(
-                                    "[CIRCUIT BREAKER] tripped {circuit_trips} times — aborting run at {timestamp}"
+                                    "[CIRCUIT BREAKER] tripped {circuit_trips} times — aborting run"
                                 );
                                 std::process::exit(1);
                             }
@@ -1101,7 +1105,8 @@ async fn main() -> Result<()> {
                             );
                             sleep(Duration::from_millis(cooldown_ms)).await;
                             consecutive_blocks = 0;
-                            current_delay_ms = MIN_REQUEST_DELAY_MS;
+                            // Resume cautiously rather than at full speed.
+                            current_delay_ms = MAX_REQUEST_DELAY_MS / 4;
                         } else {
                             sleep(Duration::from_millis(current_delay_ms)).await;
                         }
