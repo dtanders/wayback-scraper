@@ -1122,7 +1122,7 @@ async fn main() -> Result<()> {
                 if !args.verbose && ts_processed.is_multiple_of(50) {
                     log!(
                         "  … {ts_processed} processed, {} queued  \
-                        dl={ts_dl} linked={ts_linked} skip={ts_skip} err={ts_err} disc={ts_disc}",
+                        dl={ts_dl} linked={ts_linked} skip={ts_skip} err={ts_err} disc={ts_disc} in {timestamp}",
                         queue.len()
                     );
                 }
