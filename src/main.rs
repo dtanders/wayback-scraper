@@ -16,7 +16,8 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::time::sleep;
 use url::Url;
@@ -845,6 +846,7 @@ async fn main() -> Result<()> {
         log!("Before  : {ts}");
     }
     log!("Rate    : ~{REQUEST_RATE} requests / second");
+    log!("Controls: 'p' + Enter to pause  |  'r' + Enter to resume  |  Ctrl+C to stop");
     eprintln!();
 
     fs::create_dir_all(&args.output).with_context(|| {
@@ -891,6 +893,38 @@ async fn main() -> Result<()> {
         eprintln!();
     }
 
+    let shutdown = Arc::new(AtomicBool::new(false));
+    {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            log!("Interrupted — finishing current download then stopping…");
+            shutdown.store(true, Ordering::Relaxed);
+        });
+    }
+
+    let paused = Arc::new(AtomicBool::new(false));
+    {
+        let paused = paused.clone();
+        tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt as _;
+            let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                match line.trim() {
+                    "p" => {
+                        paused.store(true, Ordering::Relaxed);
+                        log!("Paused — send 'r' to resume");
+                    }
+                    "r" => {
+                        paused.store(false, Ordering::Relaxed);
+                        log!("Resumed");
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+
     let mut ts_done: usize = 0;
     let mut downloaded: usize = 0;
     let mut linked: usize = 0;
@@ -901,6 +935,7 @@ async fn main() -> Result<()> {
     let mut total_saved: u64 = 0;
     let mut consecutive_blocks: u32 = 0;
     let mut circuit_trips: u32 = 0;
+    let mut last_timestamp = String::new();
     // Adaptive inter-request delay.  Bumps up on throttling, decays on success.
     let mut current_delay_ms: u64 = MIN_REQUEST_DELAY_MS;
     // 4XX responses cached for the session — same Wayback URL won't be re-fetched.
@@ -972,6 +1007,9 @@ async fn main() -> Result<()> {
 
         // Drain all timestamps that are ready to process.
         loop {
+            if shutdown.load(Ordering::Relaxed) {
+                break;
+            }
             let Some(smallest) = by_timestamp.keys().next().cloned() else {
                 break;
             };
@@ -983,6 +1021,7 @@ async fn main() -> Result<()> {
                 break;
             }
             let (timestamp, cdx_urls) = by_timestamp.pop_first().unwrap();
+            last_timestamp.clone_from(&timestamp);
 
             ts_done += 1;
 
@@ -1004,6 +1043,19 @@ async fn main() -> Result<()> {
             }
 
             while let Some(orig_url) = queue.pop_front() {
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+                while paused.load(Ordering::Relaxed) {
+                    if shutdown.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    sleep(Duration::from_millis(200)).await;
+                }
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+
                 ts_processed += 1;
 
                 if !matches_domain(&orig_url, &apex) {
@@ -1143,7 +1195,7 @@ async fn main() -> Result<()> {
             }
         } // end drain loop
 
-        if is_last {
+        if is_last || shutdown.load(Ordering::Relaxed) {
             break;
         }
 
@@ -1152,6 +1204,9 @@ async fn main() -> Result<()> {
     } // end CDX page loop
 
     eprintln!();
+    if shutdown.load(Ordering::Relaxed) && !last_timestamp.is_empty() {
+        log!("Stopped at timestamp {last_timestamp}");
+    }
     log!(
         "Done.  timestamps={ts_done}  cdx={cdx_count}  discovered={discovered}  \
          downloaded={downloaded}  linked={linked}  skipped={skipped}  errors={errors}  \

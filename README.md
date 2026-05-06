@@ -32,6 +32,19 @@ wayback-scraper <URL> <OUTPUT> [OPTIONS]
 | `--after TIMESTAMP` | Only download snapshots at or after this timestamp (e.g. `20100101`) |
 | `--before TIMESTAMP` | Only download snapshots at or before this timestamp (e.g. `20101231235959`) |
 
+## Runtime controls
+
+While running, the process reads single-character commands from stdin:
+
+| Input | Effect |
+|---|---|
+| `p` + Enter | Pause — finish the current download then wait |
+| `r` + Enter | Resume downloading |
+| Ctrl+C | Stop after the current download completes |
+
+This makes it easy for a parent process to throttle or coordinate multiple
+scraper instances: write `p\n` / `r\n` to the child's stdin pipe.
+
 ## Build
 
 ```
