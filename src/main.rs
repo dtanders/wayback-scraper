@@ -1576,7 +1576,10 @@ mod tests {
     }
 
     // ── rewrite_html ──────────────────────────────────────────────────────────
+    // Excluded from Miri: lol_html → cssparser uses unsafe that triggers a
+    // Stacked Borrows false positive (experimental rules, not our bug).
 
+    #[cfg(not(miri))]
     #[test]
     fn rewrite_html_rewrites_href() {
         let html = r#"<a href="https://example.com/about.html">About</a>"#;
@@ -1589,6 +1592,7 @@ mod tests {
         assert!(out.contains(r#"href="about.html""#), "got: {out}");
     }
 
+    #[cfg(not(miri))]
     #[test]
     fn rewrite_html_rewrites_src() {
         let html = r#"<img src="https://example.com/img/logo.png">"#;
@@ -1601,6 +1605,7 @@ mod tests {
         assert!(out.contains(r#"src="img/logo.png""#), "got: {out}");
     }
 
+    #[cfg(not(miri))]
     #[test]
     fn rewrite_html_leaves_external_links() {
         let html = r#"<a href="https://external.com/page">Ext</a>"#;
@@ -1613,6 +1618,7 @@ mod tests {
         assert!(out.contains("https://external.com/page"), "got: {out}");
     }
 
+    #[cfg(not(miri))]
     #[test]
     fn rewrite_html_subdomain_link_rewritten() {
         let html = r#"<a href="https://sub.example.com/page.html">Sub</a>"#;
@@ -1664,7 +1670,9 @@ mod tests {
     }
 
     // ── extract_links ─────────────────────────────────────────────────────────
+    // Excluded from Miri: same cssparser false positive as rewrite_html above.
 
+    #[cfg(not(miri))]
     #[test]
     fn extract_links_returns_internal_only() {
         let html = br#"
@@ -1678,6 +1686,7 @@ mod tests {
         assert!(!links.iter().any(|l| l.contains("other.com")));
     }
 
+    #[cfg(not(miri))]
     #[test]
     fn extract_links_deduplicates() {
         let html = br#"
@@ -1688,6 +1697,7 @@ mod tests {
         assert_eq!(links.iter().filter(|l| l.contains("page.html")).count(), 1);
     }
 
+    #[cfg(not(miri))]
     #[test]
     fn extract_links_strips_query_and_fragment() {
         let html = br#"<a href="https://example.com/page.html?q=1#section">link</a>"#;
@@ -1696,6 +1706,7 @@ mod tests {
         assert!(!links.iter().any(|l| l.contains('?') || l.contains('#')));
     }
 
+    #[cfg(not(miri))]
     #[test]
     fn extract_links_includes_src_attributes() {
         let html = br#"<img src="https://example.com/logo.png">"#;
