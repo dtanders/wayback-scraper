@@ -47,10 +47,10 @@ const RETRY_BASE_MS: u64 = 2_000;
 const CIRCUIT_BREAKER_THRESHOLD: u32 = 5;
 
 /// How long to cool down when the circuit first opens; doubles on each trip.
-/// 60 s → 120 s → 240 s
+/// 60 s → 120 s → pause (trip 3 pauses instead of sleeping)
 const CIRCUIT_BREAKER_COOLDOWN_MS: u64 = 60_000;
 
-/// Abort the run after the circuit opens this many times without recovery.
+/// Pause the run after the circuit opens this many times without recovery.
 const CIRCUIT_BREAKER_MAX_TRIPS: u32 = 3;
 
 /// CDX records per API page.
