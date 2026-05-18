@@ -1144,9 +1144,14 @@ async fn main() -> Result<()> {
                             circuit_trips += 1;
                             if circuit_trips >= CIRCUIT_BREAKER_MAX_TRIPS {
                                 log!(
-                                    "[CIRCUIT BREAKER] tripped {circuit_trips} times — aborting run"
+                                    "[CIRCUIT BREAKER] tripped {circuit_trips} times — pausing \
+                                    (send 'r' + Enter to resume, Ctrl+C to abort)"
                                 );
-                                std::process::exit(1);
+                                paused.store(true, Ordering::Relaxed);
+                                circuit_trips = 0;
+                                consecutive_blocks = 0;
+                                current_delay_ms = MAX_REQUEST_DELAY_MS / 4;
+                                continue;
                             }
                             let cooldown_ms =
                                 CIRCUIT_BREAKER_COOLDOWN_MS * (1 << (circuit_trips - 1));
