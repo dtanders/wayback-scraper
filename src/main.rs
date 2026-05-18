@@ -463,7 +463,11 @@ fn extract_links(content: &[u8], base_url: &str, apex: &str) -> Vec<String> {
 // ─── HTTP helpers ─────────────────────────────────────────────────────────────
 
 fn backoff_ms(attempt: u32) -> u64 {
-    (RETRY_BASE_MS as f64 * 1.5f64.powi(attempt as i32 - 1)) as u64
+    let mut ms = RETRY_BASE_MS;
+    for _ in 1..attempt {
+        ms = ms * 3 / 2;
+    }
+    ms
 }
 
 /// GET `url` with up to `MAX_RETRIES` retries on transient (connect / timeout)

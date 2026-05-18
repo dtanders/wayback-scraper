@@ -47,13 +47,17 @@ def parse_global_env(lines: list[str]) -> dict[str, str]:
 def parse_jobs(lines: list[str]) -> list[tuple[str, list[str]]]:
     """Return list of (display_name, [run_command, ...]) in definition order.
 
-    Only jobs that have at least one `run:` step are included.
-    `uses:` steps and GitHub Actions-specific keys are skipped.
+    `run:` steps are collected directly.  `uses: dtolnay/rust-toolchain@<channel>`
+    steps with a `components:` key are translated to the equivalent
+    `rustup component add --toolchain <channel> <components>` command so that
+    locally required toolchain components (e.g. miri, rustfmt) are installed
+    automatically.  All other `uses:` steps are skipped.
     """
     jobs: list[dict] = []
     cur: dict | None = None
     in_jobs = in_steps = collecting_block = False
     block_indent: int | None = None
+    pending_toolchain: str | None = None  # channel from dtolnay/rust-toolchain@<channel>
 
     for line in lines:
         raw = line.rstrip()
@@ -76,7 +80,7 @@ def parse_jobs(lines: list[str]) -> list[tuple[str, list[str]]]:
         if indent == 2 and stripped.endswith(":") and not stripped.startswith("-"):
             cur = {"name": stripped[:-1], "runs": []}
             jobs.append(cur)
-            in_steps = collecting_block = False
+            in_steps = collecting_block = pending_toolchain = False
             continue
 
         if cur is None:
@@ -93,9 +97,10 @@ def parse_jobs(lines: list[str]) -> list[tuple[str, list[str]]]:
         if not in_steps:
             continue
 
-        # Any new step at indent 6 resets block collection
+        # Any new step at indent 6 resets state
         if indent == 6 and stripped.startswith("- "):
             collecting_block = False
+            pending_toolchain = None
 
             if stripped.startswith("- run:"):
                 cmd = stripped[len("- run:"):].strip()
@@ -104,7 +109,17 @@ def parse_jobs(lines: list[str]) -> list[tuple[str, list[str]]]:
                     block_indent = None
                 elif cmd:
                     cur["runs"].append(cmd)
-            # `- uses:` and other step types are intentionally skipped
+            elif "dtolnay/rust-toolchain@" in stripped:
+                pending_toolchain = stripped.split("dtolnay/rust-toolchain@", 1)[1].strip()
+            continue
+
+        # `components:` inside a dtolnay/rust-toolchain `with:` block
+        if pending_toolchain and indent == 10 and stripped.startswith("components:"):
+            components = stripped[len("components:"):].strip()
+            cur["runs"].append(
+                f"rustup component add --toolchain {pending_toolchain} {components}"
+            )
+            pending_toolchain = None
             continue
 
         # Body of a multi-line run block
