@@ -460,6 +460,35 @@ fn extract_links(content: &[u8], base_url: &str, apex: &str) -> Vec<String> {
     result
 }
 
+// ─── HTTP helpers ─────────────────────────────────────────────────────────────
+
+fn backoff_ms(attempt: u32) -> u64 {
+    (RETRY_BASE_MS as f64 * 1.5f64.powi(attempt as i32 - 1)) as u64
+}
+
+/// GET `url` with up to `MAX_RETRIES` retries on transient (connect / timeout)
+/// errors.  Returns the last error unchanged so callers can inspect whether it
+/// was transient.
+async fn send_with_retry(
+    client: &Client,
+    url: &str,
+    tag: &str,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let mut attempt = 0u32;
+    loop {
+        match client.get(url).send().await {
+            Ok(r) => return Ok(r),
+            Err(e) if attempt < MAX_RETRIES && (e.is_connect() || e.is_timeout()) => {
+                attempt += 1;
+                let ms = backoff_ms(attempt);
+                log!("[RETRY {attempt}/{MAX_RETRIES}] {tag} — {e} — waiting {ms}ms");
+                sleep(Duration::from_millis(ms)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 // ─── CDX fetching ─────────────────────────────────────────────────────────────
 
 /// Fetch one page of (timestamp, original_url) pairs from the CDX API.
@@ -491,21 +520,9 @@ async fn fetch_cdx_page(
         log!("Fetching CDX index (offset {offset})…");
     }
 
-    let resp = {
-        let mut attempt = 0u32;
-        loop {
-            match client.get(&req_url).send().await {
-                Ok(r) => break r,
-                Err(e) if attempt < MAX_RETRIES && (e.is_connect() || e.is_timeout()) => {
-                    attempt += 1;
-                    let delay_ms = (RETRY_BASE_MS as f64 * 1.5f64.powi(attempt as i32 - 1)) as u64;
-                    log!("[CDX RETRY {attempt}/{MAX_RETRIES}] {e} — waiting {delay_ms}ms");
-                    sleep(Duration::from_millis(delay_ms)).await;
-                }
-                Err(e) => return Err(e).context("CDX request failed"),
-            }
-        }
-    };
+    let resp = send_with_retry(client, &req_url, "CDX")
+        .await
+        .context("CDX request failed")?;
 
     if !resp.status().is_success() {
         log!("CDX API returned {}: returning empty page", resp.status());
@@ -635,6 +652,12 @@ fn ensure_dir_all(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn write_file(dest: &Path, bytes: &[u8], existing: &mut HashSet<PathBuf>) -> Result<()> {
+    fs::write(dest, bytes).with_context(|| format!("could not write: {}", dest.display()))?;
+    existing.insert(dest.to_owned());
+    Ok(())
+}
+
 // ─── Downloading ─────────────────────────────────────────────────────────────
 
 enum SnapshotOutcome {
@@ -708,27 +731,13 @@ async fn download_snapshot(
         log!("[FETCH] {wayback_url}");
     }
 
-    // Retry on transient connection/timeout errors with exponential backoff.
-    let resp = {
-        let mut attempt = 0u32;
-        loop {
-            match client.get(&wayback_url).send().await {
-                Ok(r) => break r,
-                Err(e) if attempt < MAX_RETRIES && (e.is_connect() || e.is_timeout()) => {
-                    attempt += 1;
-                    let delay_ms = (RETRY_BASE_MS as f64 * 1.5f64.powi(attempt as i32 - 1)) as u64;
-                    log!("[RETRY {attempt}/{MAX_RETRIES}] {orig_url} — {e} — waiting {delay_ms}ms");
-                    sleep(Duration::from_millis(delay_ms)).await;
-                }
-                Err(e) if e.is_connect() || e.is_timeout() => {
-                    log!("[BLOCKED] {wayback_url}");
-                    return Ok(SnapshotOutcome::Blocked);
-                }
-                Err(e) => {
-                    return Err(e).with_context(|| format!("request failed: {wayback_url}"));
-                }
-            }
+    let resp = match send_with_retry(client, &wayback_url, orig_url).await {
+        Ok(r) => r,
+        Err(e) if e.is_connect() || e.is_timeout() => {
+            log!("[BLOCKED] {wayback_url}");
+            return Ok(SnapshotOutcome::Blocked);
         }
+        Err(e) => return Err(e).with_context(|| format!("request failed: {wayback_url}")),
     };
 
     let status = resp.status();
@@ -803,14 +812,10 @@ async fn download_snapshot(
                 }
             }
         }
-        fs::write(&dest, &final_bytes)
-            .with_context(|| format!("could not write: {}", dest.display()))?;
-        existing.insert(dest.clone());
+        write_file(&dest, &final_bytes, existing)?;
         memo.insert(url_key, (dest.clone(), h));
     } else {
-        fs::write(&dest, &final_bytes)
-            .with_context(|| format!("could not write: {}", dest.display()))?;
-        existing.insert(dest.clone());
+        write_file(&dest, &final_bytes, existing)?;
     }
 
     if verbose {
