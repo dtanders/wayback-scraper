@@ -1227,3 +1227,479 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    // ── normalize_host ────────────────────────────────────────────────────────
+
+    #[test]
+    fn normalize_host_strips_www() {
+        assert_eq!(normalize_host("www.example.com"), "example.com");
+    }
+
+    #[test]
+    fn normalize_host_lowercases() {
+        assert_eq!(normalize_host("EXAMPLE.COM"), "example.com");
+    }
+
+    #[test]
+    fn normalize_host_strips_trailing_dot() {
+        assert_eq!(normalize_host("www.example.com."), "example.com");
+    }
+
+    #[test]
+    fn normalize_host_no_www_unchanged() {
+        assert_eq!(normalize_host("sub.example.com"), "sub.example.com");
+    }
+
+    // ── apex_from_url ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn apex_from_url_strips_www_and_path() {
+        assert_eq!(
+            apex_from_url("https://www.example.com/foo/bar").unwrap(),
+            "example.com"
+        );
+    }
+
+    #[test]
+    fn apex_from_url_case_insensitive() {
+        assert_eq!(apex_from_url("http://EXAMPLE.COM").unwrap(), "example.com");
+    }
+
+    #[test]
+    fn apex_from_url_invalid_is_err() {
+        assert!(apex_from_url("not a url").is_err());
+    }
+
+    // ── matches_domain ────────────────────────────────────────────────────────
+
+    #[test]
+    fn matches_domain_exact_apex() {
+        assert!(matches_domain("https://example.com/page", "example.com"));
+    }
+
+    #[test]
+    fn matches_domain_subdomain() {
+        assert!(matches_domain(
+            "https://sub.example.com/page",
+            "example.com"
+        ));
+    }
+
+    #[test]
+    fn matches_domain_www_normalised() {
+        assert!(matches_domain(
+            "https://www.example.com/page",
+            "example.com"
+        ));
+    }
+
+    #[test]
+    fn matches_domain_different_domain() {
+        assert!(!matches_domain("https://other.com/page", "example.com"));
+    }
+
+    // ── sanitize_component ────────────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_component_replaces_forbidden() {
+        assert_eq!(
+            sanitize_component(r#"a\b:c*d?e"f<g>h|i"#),
+            "a_b_c_d_e_f_g_h_i"
+        );
+    }
+
+    #[test]
+    fn sanitize_component_normal_chars_pass_through() {
+        assert_eq!(sanitize_component("normal-file.html"), "normal-file.html");
+    }
+
+    // ── url_to_rel_path ───────────────────────────────────────────────────────
+
+    #[test]
+    fn url_to_rel_path_root_becomes_index() {
+        assert_eq!(
+            url_to_rel_path("https://example.com/"),
+            PathBuf::from("index.html")
+        );
+    }
+
+    #[test]
+    fn url_to_rel_path_no_path_becomes_index() {
+        assert_eq!(
+            url_to_rel_path("https://example.com"),
+            PathBuf::from("index.html")
+        );
+    }
+
+    #[test]
+    fn url_to_rel_path_file() {
+        assert_eq!(
+            url_to_rel_path("https://example.com/foo/bar.html"),
+            PathBuf::from("foo/bar.html")
+        );
+    }
+
+    #[test]
+    fn url_to_rel_path_trailing_slash_becomes_index() {
+        assert_eq!(
+            url_to_rel_path("https://example.com/foo/"),
+            PathBuf::from("foo/index.html")
+        );
+    }
+
+    // ── url_to_local_str ──────────────────────────────────────────────────────
+
+    #[test]
+    fn url_to_local_str_root() {
+        assert_eq!(
+            url_to_local_str("https://example.com/").unwrap(),
+            "index.html"
+        );
+    }
+
+    #[test]
+    fn url_to_local_str_nested() {
+        assert_eq!(
+            url_to_local_str("https://example.com/a/b/c.js").unwrap(),
+            "a/b/c.js"
+        );
+    }
+
+    // ── rel_path_from_to ──────────────────────────────────────────────────────
+
+    #[test]
+    fn rel_path_from_to_same_directory() {
+        assert_eq!(rel_path_from_to("index.html", "about.html"), "about.html");
+    }
+
+    #[test]
+    fn rel_path_from_to_up_one_level() {
+        assert_eq!(
+            rel_path_from_to("blog/post.html", "about.html"),
+            "../about.html"
+        );
+    }
+
+    #[test]
+    fn rel_path_from_to_down_into_subdir() {
+        assert_eq!(
+            rel_path_from_to("index.html", "blog/post.html"),
+            "blog/post.html"
+        );
+    }
+
+    #[test]
+    fn rel_path_from_to_sibling_subtree() {
+        assert_eq!(rel_path_from_to("a/b/c.html", "a/d/e.html"), "../d/e.html");
+    }
+
+    // ── unwrap_wayback ────────────────────────────────────────────────────────
+
+    #[test]
+    fn unwrap_wayback_standard_url() {
+        assert_eq!(
+            unwrap_wayback(
+                "https://web.archive.org/web/20090306084941/https://example.com/page.html"
+            ),
+            "https://example.com/page.html"
+        );
+    }
+
+    #[test]
+    fn unwrap_wayback_with_modifier() {
+        assert_eq!(
+            unwrap_wayback(
+                "https://web.archive.org/web/20090306084941im_/https://example.com/img.png"
+            ),
+            "https://example.com/img.png"
+        );
+    }
+
+    #[test]
+    fn unwrap_wayback_embedded_form() {
+        assert_eq!(
+            unwrap_wayback(
+                "http://www.rifters.org/web/20090306084941im_/http_/www.rifters.org/img.png"
+            ),
+            "http://www.rifters.org/img.png"
+        );
+    }
+
+    #[test]
+    fn unwrap_wayback_non_wayback_unchanged() {
+        let url = "https://example.com/normal/url.html";
+        assert_eq!(unwrap_wayback(url), url);
+    }
+
+    // ── looks_like_html ───────────────────────────────────────────────────────
+
+    #[test]
+    fn looks_like_html_doctype() {
+        assert!(looks_like_html(b"<!DOCTYPE html><html>"));
+    }
+
+    #[test]
+    fn looks_like_html_html_tag() {
+        assert!(looks_like_html(b"<html lang='en'>"));
+    }
+
+    #[test]
+    fn looks_like_html_head_tag() {
+        assert!(looks_like_html(b"  <head><title>Test</title></head>"));
+    }
+
+    #[test]
+    fn looks_like_html_png_header_is_not_html() {
+        assert!(!looks_like_html(&[0x89, 0x50, 0x4E, 0x47]));
+    }
+
+    #[test]
+    fn looks_like_html_css_is_not_html() {
+        assert!(!looks_like_html(b"body { margin: 0; }"));
+    }
+
+    // ── format_bytes ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn format_bytes_raw_bytes() {
+        assert_eq!(format_bytes(512), "512 B");
+    }
+
+    #[test]
+    fn format_bytes_kilobytes() {
+        assert_eq!(format_bytes(1_024), "1.0 KB");
+    }
+
+    #[test]
+    fn format_bytes_megabytes() {
+        assert_eq!(format_bytes(1_024 * 1_024), "1.0 MB");
+    }
+
+    #[test]
+    fn format_bytes_gigabytes() {
+        assert_eq!(format_bytes(1_024 * 1_024 * 1_024), "1.0 GB");
+    }
+
+    // ── backoff_ms ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn backoff_ms_exponential_sequence() {
+        assert_eq!(backoff_ms(1), 2_000); // 2000 * 1.5^0
+        assert_eq!(backoff_ms(2), 3_000); // 2000 * 1.5^1
+        assert_eq!(backoff_ms(3), 4_500); // 2000 * 1.5^2
+        assert_eq!(backoff_ms(4), 6_750); // 2000 * 1.5^3
+    }
+
+    // ── rewrite_url ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn rewrite_url_same_domain_absolute() {
+        let r = rewrite_url(
+            "https://example.com/about.html",
+            "https://example.com/index.html",
+            "index.html",
+            "example.com",
+        );
+        assert_eq!(r, Some("about.html".to_string()));
+    }
+
+    #[test]
+    fn rewrite_url_relative_input_resolved() {
+        // "../images/logo.png" from blog/post.html → resolves to /images/logo.png
+        let r = rewrite_url(
+            "../images/logo.png",
+            "https://example.com/blog/post.html",
+            "blog/post.html",
+            "example.com",
+        );
+        assert_eq!(r, Some("../images/logo.png".to_string()));
+    }
+
+    #[test]
+    fn rewrite_url_preserves_fragment() {
+        let r = rewrite_url(
+            "https://example.com/about.html#section",
+            "https://example.com/index.html",
+            "index.html",
+            "example.com",
+        );
+        assert_eq!(r, Some("about.html#section".to_string()));
+    }
+
+    #[test]
+    fn rewrite_url_external_domain_is_none() {
+        let r = rewrite_url(
+            "https://other.com/page",
+            "https://example.com/index.html",
+            "index.html",
+            "example.com",
+        );
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn rewrite_url_javascript_is_none() {
+        let r = rewrite_url(
+            "javascript:void(0)",
+            "https://example.com/index.html",
+            "index.html",
+            "example.com",
+        );
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn rewrite_url_data_uri_is_none() {
+        let r = rewrite_url(
+            "data:image/png;base64,abc",
+            "https://example.com/index.html",
+            "index.html",
+            "example.com",
+        );
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn rewrite_url_unwraps_wayback_wrapper() {
+        let r = rewrite_url(
+            "https://web.archive.org/web/20090306084941/https://example.com/img.png",
+            "https://example.com/index.html",
+            "index.html",
+            "example.com",
+        );
+        assert_eq!(r, Some("img.png".to_string()));
+    }
+
+    // ── rewrite_html ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn rewrite_html_rewrites_href() {
+        let html = r#"<a href="https://example.com/about.html">About</a>"#;
+        let out = rewrite_html(
+            html,
+            "https://example.com/index.html",
+            "index.html",
+            "example.com",
+        );
+        assert!(out.contains(r#"href="about.html""#), "got: {out}");
+    }
+
+    #[test]
+    fn rewrite_html_rewrites_src() {
+        let html = r#"<img src="https://example.com/img/logo.png">"#;
+        let out = rewrite_html(
+            html,
+            "https://example.com/index.html",
+            "index.html",
+            "example.com",
+        );
+        assert!(out.contains(r#"src="img/logo.png""#), "got: {out}");
+    }
+
+    #[test]
+    fn rewrite_html_leaves_external_links() {
+        let html = r#"<a href="https://external.com/page">Ext</a>"#;
+        let out = rewrite_html(
+            html,
+            "https://example.com/index.html",
+            "index.html",
+            "example.com",
+        );
+        assert!(out.contains("https://external.com/page"), "got: {out}");
+    }
+
+    #[test]
+    fn rewrite_html_subdomain_link_rewritten() {
+        let html = r#"<a href="https://sub.example.com/page.html">Sub</a>"#;
+        let out = rewrite_html(
+            html,
+            "https://example.com/index.html",
+            "index.html",
+            "example.com",
+        );
+        assert!(out.contains(r#"href="page.html""#), "got: {out}");
+    }
+
+    // ── rewrite_css ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn rewrite_css_url_unquoted() {
+        let css = "body { background: url(https://example.com/bg.png); }";
+        let out = rewrite_css(
+            css,
+            "https://example.com/style.css",
+            "style.css",
+            "example.com",
+        );
+        assert!(out.contains("url(bg.png)"), "got: {out}");
+    }
+
+    #[test]
+    fn rewrite_css_url_double_quoted() {
+        let css = r#"body { background: url("https://example.com/bg.png"); }"#;
+        let out = rewrite_css(
+            css,
+            "https://example.com/style.css",
+            "style.css",
+            "example.com",
+        );
+        assert!(out.contains(r#"url("bg.png")"#), "got: {out}");
+    }
+
+    #[test]
+    fn rewrite_css_external_url_unchanged() {
+        let css = "body { background: url(https://other.com/bg.png); }";
+        let out = rewrite_css(
+            css,
+            "https://example.com/style.css",
+            "style.css",
+            "example.com",
+        );
+        assert!(out.contains("https://other.com/bg.png"), "got: {out}");
+    }
+
+    // ── extract_links ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn extract_links_returns_internal_only() {
+        let html = br#"
+            <a href="https://example.com/page1.html">P1</a>
+            <a href="https://example.com/page2.html">P2</a>
+            <a href="https://other.com/external">Ext</a>
+        "#;
+        let links = extract_links(html, "https://example.com/index.html", "example.com");
+        assert!(links.contains(&"https://example.com/page1.html".to_string()));
+        assert!(links.contains(&"https://example.com/page2.html".to_string()));
+        assert!(!links.iter().any(|l| l.contains("other.com")));
+    }
+
+    #[test]
+    fn extract_links_deduplicates() {
+        let html = br#"
+            <a href="https://example.com/page.html">1</a>
+            <a href="https://example.com/page.html">2</a>
+        "#;
+        let links = extract_links(html, "https://example.com/", "example.com");
+        assert_eq!(links.iter().filter(|l| l.contains("page.html")).count(), 1);
+    }
+
+    #[test]
+    fn extract_links_strips_query_and_fragment() {
+        let html = br#"<a href="https://example.com/page.html?q=1#section">link</a>"#;
+        let links = extract_links(html, "https://example.com/", "example.com");
+        assert!(links.contains(&"https://example.com/page.html".to_string()));
+        assert!(!links.iter().any(|l| l.contains('?') || l.contains('#')));
+    }
+
+    #[test]
+    fn extract_links_includes_src_attributes() {
+        let html = br#"<img src="https://example.com/logo.png">"#;
+        let links = extract_links(html, "https://example.com/", "example.com");
+        assert!(links.contains(&"https://example.com/logo.png".to_string()));
+    }
+}
