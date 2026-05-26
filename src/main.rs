@@ -634,6 +634,66 @@ fn load_suspend_file(path: &Path) -> Result<SuspendState> {
     serde_json::from_str(&json).with_context(|| format!("parse suspend file: {}", path.display()))
 }
 
+/// Search `dir/.wayback-scraper/` for suspend files.
+/// If exactly one is found, auto-selects it. If multiple, prompts the user.
+/// Returns an error if none are found.
+#[allow(dead_code)]
+fn pick_suspend_file(dir: &Path) -> Result<PathBuf> {
+    let cache_dir = dir.join(".wayback-scraper");
+
+    let mut files: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+    if let Ok(entries) = fs::read_dir(&cache_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with("suspend_") && name.ends_with(".json") {
+                if let Ok(meta) = entry.metadata() {
+                    if let Ok(mtime) = meta.modified() {
+                        files.push((path, mtime));
+                    }
+                }
+            }
+        }
+    }
+
+    if files.is_empty() {
+        anyhow::bail!("No suspend files found in {}", cache_dir.display());
+    }
+
+    // Newest first.
+    files.sort_by(|a, b| b.1.cmp(&a.1));
+
+    if files.len() == 1 {
+        let path = files.remove(0).0;
+        eprintln!("Loading suspend file: {}", path.display());
+        return Ok(path);
+    }
+
+    eprintln!("Suspend files found:");
+    for (i, (path, mtime)) in files.iter().enumerate() {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+        let dt: chrono::DateTime<chrono::Local> = (*mtime).into();
+        eprintln!("  {})  {}  ({})", i + 1, name, dt.format("%Y-%m-%d %H:%M"));
+    }
+    eprint!("Choose [1-{}]: ", files.len());
+
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("failed to read choice")?;
+    let choice: usize = line
+        .trim()
+        .parse()
+        .context("invalid choice — enter a number")?;
+    anyhow::ensure!(
+        choice >= 1 && choice <= files.len(),
+        "choice {choice} out of range [1-{}]",
+        files.len()
+    );
+
+    Ok(files.remove(choice - 1).0)
+}
+
 // ─── Content hashing ──────────────────────────────────────────────────────────
 
 fn hash_bytes(bytes: &[u8]) -> u64 {
