@@ -1458,13 +1458,15 @@ async fn main() -> Result<()> {
         }
     }
 
-    log!(
-        "Done.  timestamps={ts_done}  cdx={cdx_count}  discovered={discovered}  \
-         downloaded={downloaded}  linked={linked}  skipped={skipped}  errors={errors}  \
-         bytes={}  saved={}",
-        format_bytes(total_bytes),
-        format_bytes(total_saved)
-    );
+    if !suspending.load(Ordering::Relaxed) {
+        log!(
+            "Done.  timestamps={ts_done}  cdx={cdx_count}  discovered={discovered}  \
+             downloaded={downloaded}  linked={linked}  skipped={skipped}  errors={errors}  \
+             bytes={}  saved={}",
+            format_bytes(total_bytes),
+            format_bytes(total_saved)
+        );
+    }
 
     Ok(())
 }
