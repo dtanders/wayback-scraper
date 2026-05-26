@@ -602,7 +602,6 @@ fn format_bytes(n: u64) -> String {
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
-#[allow(dead_code)]
 struct SavedArgs {
     url: String,
     output: PathBuf,
@@ -613,7 +612,6 @@ struct SavedArgs {
 }
 
 #[derive(Serialize, Deserialize)]
-#[allow(dead_code)]
 struct SuspendState {
     version: u32,
     suspended_at: String,
@@ -647,7 +645,6 @@ fn save_suspend_state(cache_dir: &Path, state: &SuspendState) -> Result<PathBuf>
     Ok(path)
 }
 
-#[allow(dead_code)]
 fn load_suspend_file(path: &Path) -> Result<SuspendState> {
     let json = fs::read_to_string(path)
         .with_context(|| format!("read suspend file: {}", path.display()))?;
@@ -657,7 +654,6 @@ fn load_suspend_file(path: &Path) -> Result<SuspendState> {
 /// Search `dir/.wayback-scraper/` for suspend files.
 /// If exactly one is found, auto-selects it. If multiple, prompts the user.
 /// Returns an error if none are found.
-#[allow(dead_code)]
 fn pick_suspend_file(dir: &Path) -> Result<PathBuf> {
     let cache_dir = dir.join(".wayback-scraper");
 
@@ -982,25 +978,64 @@ async fn main() -> Result<()> {
         Args::from_arg_matches(&cmd.get_matches()).unwrap()
     };
 
-    let apex = apex_from_url(&args.url)?;
+    // Load resume state (if --resume or --resume-file was given).
+    let resume_state: Option<SuspendState> = if let Some(ref path) = args.resume_file {
+        Some(load_suspend_file(path)?)
+    } else if let Some(ref dir) = args.resume {
+        Some(load_suspend_file(&pick_suspend_file(dir)?)?)
+    } else {
+        None
+    };
+
+    // Effective run config — comes from suspend file in resume mode.
+    let (url, output, verbose, include_exact_copies, after, before) =
+        if let Some(ref s) = resume_state {
+            (
+                s.args.url.clone(),
+                s.args.output.clone(),
+                s.args.verbose,
+                s.args.include_exact_copies,
+                s.args.after.clone(),
+                s.args.before.clone(),
+            )
+        } else {
+            (
+                args.url.clone().unwrap(),
+                args.output.clone().unwrap(),
+                args.verbose,
+                args.include_exact_copies,
+                args.after.clone(),
+                args.before.clone(),
+            )
+        };
+
+    let resume_from_timestamp: Option<String> =
+        resume_state.as_ref().map(|s| s.last_timestamp.clone());
+
+    let apex = apex_from_url(&url)?;
+    if let Some(ref s) = resume_state {
+        log!(
+            "Resuming from suspend — continuing at timestamp {}",
+            s.last_timestamp
+        );
+    }
     log!("Domain  : {apex}  (subdomains included)");
-    log!("Output  : {}", args.output.display());
-    if let Some(ts) = &args.after {
+    log!("Output  : {}", output.display());
+    if let Some(ts) = &after {
         log!("After   : {ts}");
     }
-    if let Some(ts) = &args.before {
+    if let Some(ts) = &before {
         log!("Before  : {ts}");
     }
     log!("Rate    : ~{REQUEST_RATE} requests / second");
-    log!("Controls: 'p' + Enter to pause  |  'r' + Enter to resume  |  Ctrl+C to stop");
+    log!(
+        "Controls: 'p' + Enter to pause  |  'r' + Enter to resume  |  \
+         's' + Enter to suspend  |  Ctrl+C to stop"
+    );
     eprintln!();
 
-    fs::create_dir_all(&args.output).with_context(|| {
-        format!(
-            "could not create output directory: {}",
-            args.output.display()
-        )
-    })?;
+    fs::create_dir_all(&output)
+        .with_context(|| format!("could not create output directory: {}", output.display()))?;
 
     let client = Client::builder()
         .user_agent("wayback-scraper/0.1 (+https://github.com/; archival/research use)")
@@ -1014,7 +1049,7 @@ async fn main() -> Result<()> {
     // has already been received (all timestamps strictly less than the last
     // timestamp on the page).  The final page flushes everything.  This lets
     // downloading begin without waiting for the full index.
-    let cache_dir = args.output.join(".wayback-scraper");
+    let cache_dir = output.join(".wayback-scraper");
     fs::create_dir_all(&cache_dir)
         .with_context(|| format!("create cache dir {}", cache_dir.display()))?;
     let cdx_cache_path = cache_dir.join(format!("cdx_{apex}.json"));
@@ -1025,12 +1060,18 @@ async fn main() -> Result<()> {
     let mut cdx_count: usize = 0;
     let mut offset: u32 = 0;
 
-    let dedup = !args.include_exact_copies;
-    let mut memo: HashMap<String, (PathBuf, u64)> = HashMap::new();
+    let dedup = !include_exact_copies;
+
+    // For resume, CDX cache must already exist on disk.
+    if resume_state.is_some() && !cdx_cache_path.exists() {
+        anyhow::bail!(
+            "Cannot resume: CDX cache not found at {}",
+            cdx_cache_path.display()
+        );
+    }
 
     log!("Scanning output directory for existing files…");
-    let mut existing =
-        scan_existing_files(&args.output).context("failed to scan existing files")?;
+    let mut existing = scan_existing_files(&output).context("failed to scan existing files")?;
     if !existing.is_empty() {
         log!(
             "Resume: {} files already on disk (skipping via index)",
@@ -1071,21 +1112,26 @@ async fn main() -> Result<()> {
         });
     }
 
-    let mut ts_done: usize = 0;
-    let mut downloaded: usize = 0;
-    let mut linked: usize = 0;
-    let mut skipped: usize = 0;
-    let mut errors: usize = 0;
-    let mut discovered: usize = 0;
-    let mut total_bytes: u64 = 0;
-    let mut total_saved: u64 = 0;
+    let mut ts_done: usize = resume_state.as_ref().map_or(0, |s| s.ts_done);
+    let mut downloaded: usize = resume_state.as_ref().map_or(0, |s| s.downloaded);
+    let mut linked: usize = resume_state.as_ref().map_or(0, |s| s.linked);
+    let mut skipped: usize = resume_state.as_ref().map_or(0, |s| s.skipped);
+    let mut errors: usize = resume_state.as_ref().map_or(0, |s| s.errors);
+    let mut discovered: usize = resume_state.as_ref().map_or(0, |s| s.discovered);
+    let mut total_bytes: u64 = resume_state.as_ref().map_or(0, |s| s.total_bytes);
+    let mut total_saved: u64 = resume_state.as_ref().map_or(0, |s| s.total_saved);
     let mut consecutive_blocks: u32 = 0;
     let mut circuit_trips: u32 = 0;
     let mut last_timestamp = String::new();
-    // Adaptive inter-request delay.  Bumps up on throttling, decays on success.
-    let mut current_delay_ms: u64 = MIN_REQUEST_DELAY_MS;
-    // 4XX responses cached for the session — same Wayback URL won't be re-fetched.
-    let mut failed_urls: HashSet<String> = HashSet::new();
+    let mut current_delay_ms: u64 = resume_state
+        .as_ref()
+        .map_or(MIN_REQUEST_DELAY_MS, |s| s.current_delay_ms);
+    let mut failed_urls: HashSet<String> = resume_state
+        .as_ref()
+        .map_or_else(HashSet::new, |s| s.failed_urls.clone());
+    let mut memo: HashMap<String, (PathBuf, u64)> = resume_state
+        .as_ref()
+        .map_or_else(HashMap::new, |s| s.memo.clone());
 
     loop {
         // Obtain the next batch of CDX entries.
@@ -1096,20 +1142,29 @@ async fn main() -> Result<()> {
             let mut pairs: Vec<(String, String)> = serde_json::from_str(&raw)
                 .with_context(|| format!("parse CDX cache {}", cdx_cache_path.display()))?;
             // Apply date filters — cache may have been built without them.
-            if args.after.is_some() || args.before.is_some() {
+            if after.is_some() || before.is_some() {
                 pairs.retain(|(ts, _)| {
-                    if let Some(after) = &args.after {
-                        if ts.as_str() < after.as_str() {
+                    if let Some(a) = &after {
+                        if ts.as_str() < a.as_str() {
                             return false;
                         }
                     }
-                    if let Some(before) = &args.before {
-                        if ts.as_str() > before.as_str() {
+                    if let Some(b) = &before {
+                        if ts.as_str() > b.as_str() {
                             return false;
                         }
                     }
                     true
                 });
+            }
+            // Resume filter — skip timestamps already processed.
+            if let Some(ref from_ts) = resume_from_timestamp {
+                pairs.retain(|(ts, _)| ts.as_str() >= from_ts.as_str());
+                log!(
+                    "Resuming: {} CDX entries remaining (>= {})",
+                    pairs.len(),
+                    from_ts
+                );
             }
             log!("CDX entries found : {}", pairs.len());
             eprintln!();
@@ -1119,9 +1174,9 @@ async fn main() -> Result<()> {
                 &client,
                 &apex,
                 offset,
-                args.verbose,
-                args.after.as_deref(),
-                args.before.as_deref(),
+                verbose,
+                after.as_deref(),
+                before.as_deref(),
             )
             .await?;
             let is_last = page.len() < CDX_PAGE_SIZE as usize;
@@ -1184,7 +1239,7 @@ async fn main() -> Result<()> {
             let mut ts_bytes = 0u64;
             let mut ts_saved = 0u64;
 
-            if !args.verbose {
+            if !verbose {
                 log!("[ts {ts_done}] {timestamp}  ({} CDX URLs)", queue.len());
             }
 
@@ -1205,7 +1260,7 @@ async fn main() -> Result<()> {
                 ts_processed += 1;
 
                 if !matches_domain(&orig_url, &apex) {
-                    if args.verbose {
+                    if verbose {
                         log!("[SKIP-DOMAIN] {orig_url}");
                     }
                     ts_skip += 1;
@@ -1227,7 +1282,7 @@ async fn main() -> Result<()> {
                     }
                     if new_count > 0 {
                         ts_disc += new_count;
-                        if args.verbose {
+                        if verbose {
                             log!("[LINKS] +{new_count} queued from {orig_url}");
                         }
                     }
@@ -1237,9 +1292,9 @@ async fn main() -> Result<()> {
                     &client,
                     &timestamp,
                     &orig_url,
-                    &args.output,
+                    &output,
                     &apex,
-                    args.verbose,
+                    verbose,
                     dedup,
                     &mut memo,
                     &mut existing,
@@ -1322,7 +1377,7 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                if !args.verbose && ts_processed.is_multiple_of(50) {
+                if !verbose && ts_processed.is_multiple_of(50) {
                     log!(
                         "  … {ts_processed} processed, {} queued  \
                         dl={ts_dl} linked={ts_linked} skip={ts_skip} err={ts_err} disc={ts_disc} in {timestamp}",
@@ -1339,7 +1394,7 @@ async fn main() -> Result<()> {
             total_bytes += ts_bytes;
             total_saved += ts_saved;
 
-            if !args.verbose {
+            if !verbose {
                 log!(
                     "  done  dl={ts_dl}  linked={ts_linked}  skip={ts_skip}  err={ts_err}  disc={ts_disc}"
                 );
@@ -1918,6 +1973,8 @@ mod tests {
 
     // ── save_suspend_state & load_suspend_file ────────────────────────────────
 
+    // Excluded from Miri: uses SystemTime::now() which requires OS isolation.
+    #[cfg(not(miri))]
     #[test]
     fn save_and_reload_suspend_state() {
         use std::time::{SystemTime, UNIX_EPOCH};
