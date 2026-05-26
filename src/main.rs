@@ -602,6 +602,7 @@ struct SuspendState {
     last_timestamp: String,
     current_delay_ms: u64,
     failed_urls: HashSet<String>,
+    /// url path (no query/fragment) → (absolute local file path, content hash)
     memo: HashMap<String, (PathBuf, u64)>,
     ts_done: usize,
     downloaded: usize,
@@ -616,6 +617,23 @@ struct SuspendState {
 #[allow(dead_code)]
 fn suspend_file_path(cache_dir: &Path, apex: &str, last_timestamp: &str) -> PathBuf {
     cache_dir.join(format!("suspend_{apex}_{last_timestamp}.json"))
+}
+
+#[allow(dead_code)]
+fn save_suspend_state(cache_dir: &Path, state: &SuspendState) -> Result<PathBuf> {
+    let path = suspend_file_path(cache_dir, &state.apex, &state.last_timestamp);
+    let json = serde_json::to_string_pretty(state).context("serialize suspend state")?;
+    fs::write(&path, &json)
+        .with_context(|| format!("write suspend file: {}", path.display()))?;
+    Ok(path)
+}
+
+#[allow(dead_code)]
+fn load_suspend_file(path: &Path) -> Result<SuspendState> {
+    let json = fs::read_to_string(path)
+        .with_context(|| format!("read suspend file: {}", path.display()))?;
+    serde_json::from_str(&json)
+        .with_context(|| format!("parse suspend file: {}", path.display()))
 }
 
 // ─── Content hashing ──────────────────────────────────────────────────────────
@@ -1818,5 +1836,59 @@ mod tests {
         assert_eq!(got.args.before.as_deref(), Some("20100101"));
         assert_eq!(got.ts_done, 10);
         assert_eq!(got.total_bytes, 1024);
+    }
+
+    // ── save_suspend_state & load_suspend_file ────────────────────────────────
+
+    #[test]
+    fn save_and_reload_suspend_state() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        let dir = std::env::temp_dir().join(format!("wayback_test_{nonce}"));
+        let cache_dir = dir.join(".wayback-scraper");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+
+        let state = SuspendState {
+            version: 1,
+            suspended_at: "2026-05-26T12:00:00+00:00".to_string(),
+            apex: "test.com".to_string(),
+            args: SavedArgs {
+                url: "https://test.com".to_string(),
+                output: dir.clone(),
+                verbose: false,
+                include_exact_copies: false,
+                after: None,
+                before: None,
+            },
+            last_timestamp: "20200101000000".to_string(),
+            current_delay_ms: 250,
+            failed_urls: std::collections::HashSet::new(),
+            memo: std::collections::HashMap::new(),
+            ts_done: 1,
+            downloaded: 1,
+            linked: 0,
+            skipped: 0,
+            errors: 0,
+            discovered: 0,
+            total_bytes: 100,
+            total_saved: 0,
+        };
+
+        let path = save_suspend_state(&cache_dir, &state).unwrap();
+        assert!(path.exists());
+        assert_eq!(
+            path,
+            cache_dir.join("suspend_test.com_20200101000000.json")
+        );
+
+        let loaded = load_suspend_file(&path).unwrap();
+        assert_eq!(loaded.apex, "test.com");
+        assert_eq!(loaded.last_timestamp, "20200101000000");
+        assert_eq!(loaded.ts_done, 1);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
