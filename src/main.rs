@@ -623,8 +623,7 @@ fn suspend_file_path(cache_dir: &Path, apex: &str, last_timestamp: &str) -> Path
 fn save_suspend_state(cache_dir: &Path, state: &SuspendState) -> Result<PathBuf> {
     let path = suspend_file_path(cache_dir, &state.apex, &state.last_timestamp);
     let json = serde_json::to_string_pretty(state).context("serialize suspend state")?;
-    fs::write(&path, &json)
-        .with_context(|| format!("write suspend file: {}", path.display()))?;
+    fs::write(&path, &json).with_context(|| format!("write suspend file: {}", path.display()))?;
     Ok(path)
 }
 
@@ -632,8 +631,7 @@ fn save_suspend_state(cache_dir: &Path, state: &SuspendState) -> Result<PathBuf>
 fn load_suspend_file(path: &Path) -> Result<SuspendState> {
     let json = fs::read_to_string(path)
         .with_context(|| format!("read suspend file: {}", path.display()))?;
-    serde_json::from_str(&json)
-        .with_context(|| format!("parse suspend file: {}", path.display()))
+    serde_json::from_str(&json).with_context(|| format!("parse suspend file: {}", path.display()))
 }
 
 // ─── Content hashing ──────────────────────────────────────────────────────────
@@ -1879,10 +1877,7 @@ mod tests {
 
         let path = save_suspend_state(&cache_dir, &state).unwrap();
         assert!(path.exists());
-        assert_eq!(
-            path,
-            cache_dir.join("suspend_test.com_20200101000000.json")
-        );
+        assert_eq!(path, cache_dir.join("suspend_test.com_20200101000000.json"));
 
         let loaded = load_suspend_file(&path).unwrap();
         assert_eq!(loaded.apex, "test.com");
