@@ -92,10 +92,12 @@ rate-limited to roughly {REQUEST_RATE} per second, backing off automatically if 
 )]
 struct Args {
     /// URL of the site to archive (e.g. https://example.com)
-    url: String,
+    #[arg(required_unless_present_any = ["resume", "resume_file"])]
+    url: Option<String>,
 
     /// Root directory for downloaded files
-    output: PathBuf,
+    #[arg(required_unless_present_any = ["resume", "resume_file"])]
+    output: Option<PathBuf>,
 
     /// Print detailed progress for every request
     #[arg(short, long)]
@@ -116,6 +118,24 @@ struct Args {
     /// any prefix, e.g. 20101231235959).
     #[arg(long, value_name = "TIMESTAMP")]
     before: Option<String>,
+
+    /// Resume from a suspended session.  Searches OUTPUT_DIR/.wayback-scraper/
+    /// for suspend files.  If OUTPUT_DIR is omitted, searches the current
+    /// directory.  If exactly one file is found it is loaded automatically;
+    /// otherwise you are prompted to choose.
+    #[arg(
+        short = 'r',
+        long,
+        value_name = "OUTPUT_DIR",
+        num_args = 0..=1,
+        default_missing_value = ".",
+        conflicts_with = "resume_file"
+    )]
+    resume: Option<PathBuf>,
+
+    /// Resume from a specific suspend file.
+    #[arg(long, value_name = "FILE", conflicts_with = "resume")]
+    resume_file: Option<PathBuf>,
 }
 
 // ─── Domain helpers ───────────────────────────────────────────────────────────
