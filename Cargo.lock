@@ -2012,6 +2012,7 @@ dependencies = [
  "lol_html",
  "regex",
  "reqwest",
+ "serde",
  "serde_json",
  "tokio",
  "url",
