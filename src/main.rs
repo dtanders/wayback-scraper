@@ -577,6 +577,47 @@ fn format_bytes(n: u64) -> String {
     }
 }
 
+// ─── Suspend / resume types ───────────────────────────────────────────────────
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+#[allow(dead_code)]
+struct SavedArgs {
+    url: String,
+    output: PathBuf,
+    verbose: bool,
+    include_exact_copies: bool,
+    after: Option<String>,
+    before: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[allow(dead_code)]
+struct SuspendState {
+    version: u32,
+    suspended_at: String,
+    apex: String,
+    args: SavedArgs,
+    last_timestamp: String,
+    current_delay_ms: u64,
+    failed_urls: HashSet<String>,
+    memo: HashMap<String, (PathBuf, u64)>,
+    ts_done: usize,
+    downloaded: usize,
+    linked: usize,
+    skipped: usize,
+    errors: usize,
+    discovered: usize,
+    total_bytes: u64,
+    total_saved: u64,
+}
+
+#[allow(dead_code)]
+fn suspend_file_path(cache_dir: &Path, apex: &str, last_timestamp: &str) -> PathBuf {
+    cache_dir.join(format!("suspend_{apex}_{last_timestamp}.json"))
+}
+
 // ─── Content hashing ──────────────────────────────────────────────────────────
 
 fn hash_bytes(bytes: &[u8]) -> u64 {
@@ -1716,5 +1757,66 @@ mod tests {
         let html = br#"<img src="https://example.com/logo.png">"#;
         let links = extract_links(html, "https://example.com/", "example.com");
         assert!(links.contains(&"https://example.com/logo.png".to_string()));
+    }
+
+    // ── suspend state ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn suspend_file_path_format() {
+        let p = suspend_file_path(
+            Path::new("/out/.wayback-scraper"),
+            "example.com",
+            "20091204120000",
+        );
+        assert_eq!(
+            p,
+            Path::new("/out/.wayback-scraper/suspend_example.com_20091204120000.json")
+        );
+    }
+
+    #[test]
+    fn suspend_state_round_trips() {
+        let state = SuspendState {
+            version: 1,
+            suspended_at: "2026-05-26T12:00:00+00:00".to_string(),
+            apex: "example.com".to_string(),
+            args: SavedArgs {
+                url: "https://example.com".to_string(),
+                output: PathBuf::from("/tmp/out"),
+                verbose: false,
+                include_exact_copies: false,
+                after: None,
+                before: Some("20100101".to_string()),
+            },
+            last_timestamp: "20091204120000".to_string(),
+            current_delay_ms: 500,
+            failed_urls: std::collections::HashSet::from(["http://example.com/404".to_string()]),
+            memo: std::collections::HashMap::from([(
+                "index.html".to_string(),
+                (
+                    PathBuf::from("/tmp/out/20091204120000/index.html"),
+                    0xdeadbeef_u64,
+                ),
+            )]),
+            ts_done: 10,
+            downloaded: 8,
+            linked: 2,
+            skipped: 1,
+            errors: 0,
+            discovered: 5,
+            total_bytes: 1024,
+            total_saved: 512,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let got: SuspendState = serde_json::from_str(&json).unwrap();
+        assert_eq!(got.version, 1);
+        assert_eq!(got.apex, "example.com");
+        assert_eq!(got.last_timestamp, "20091204120000");
+        assert_eq!(got.current_delay_ms, 500);
+        assert!(got.failed_urls.contains("http://example.com/404"));
+        assert_eq!(got.memo["index.html"].1, 0xdeadbeef_u64);
+        assert_eq!(got.args.before.as_deref(), Some("20100101"));
+        assert_eq!(got.ts_done, 10);
+        assert_eq!(got.total_bytes, 1024);
     }
 }
