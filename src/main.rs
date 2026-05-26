@@ -1063,7 +1063,7 @@ async fn main() -> Result<()> {
     let dedup = !include_exact_copies;
 
     // For resume, CDX cache must already exist on disk.
-    if resume_state.is_some() && !cdx_cache_path.exists() {
+    if resume_state.is_some() && !is_cached {
         anyhow::bail!(
             "Cannot resume: CDX cache not found at {}",
             cdx_cache_path.display()
