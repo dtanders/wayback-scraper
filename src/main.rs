@@ -632,12 +632,10 @@ struct SuspendState {
     total_saved: u64,
 }
 
-#[allow(dead_code)]
 fn suspend_file_path(cache_dir: &Path, apex: &str, last_timestamp: &str) -> PathBuf {
     cache_dir.join(format!("suspend_{apex}_{last_timestamp}.json"))
 }
 
-#[allow(dead_code)]
 fn save_suspend_state(cache_dir: &Path, state: &SuspendState) -> Result<PathBuf> {
     let path = suspend_file_path(cache_dir, &state.apex, &state.last_timestamp);
     let json = serde_json::to_string_pretty(state).context("serialize suspend state")?;
@@ -1091,8 +1089,10 @@ async fn main() -> Result<()> {
     }
 
     let paused = Arc::new(AtomicBool::new(false));
+    let suspending = Arc::new(AtomicBool::new(false));
     {
         let paused = paused.clone();
+        let suspending = suspending.clone();
         tokio::spawn(async move {
             use tokio::io::AsyncBufReadExt as _;
             let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
@@ -1105,6 +1105,10 @@ async fn main() -> Result<()> {
                     "r" => {
                         paused.store(false, Ordering::Relaxed);
                         log!("Resumed");
+                    }
+                    "s" => {
+                        suspending.store(true, Ordering::Relaxed);
+                        log!("Suspending — finishing current download…");
                     }
                     _ => {}
                 }
@@ -1208,7 +1212,7 @@ async fn main() -> Result<()> {
 
         // Drain all timestamps that are ready to process.
         loop {
-            if shutdown.load(Ordering::Relaxed) {
+            if shutdown.load(Ordering::Relaxed) || suspending.load(Ordering::Relaxed) {
                 break;
             }
             let Some(smallest) = by_timestamp.keys().next().cloned() else {
@@ -1244,16 +1248,16 @@ async fn main() -> Result<()> {
             }
 
             while let Some(orig_url) = queue.pop_front() {
-                if shutdown.load(Ordering::Relaxed) {
+                if shutdown.load(Ordering::Relaxed) || suspending.load(Ordering::Relaxed) {
                     break;
                 }
                 while paused.load(Ordering::Relaxed) {
-                    if shutdown.load(Ordering::Relaxed) {
+                    if shutdown.load(Ordering::Relaxed) || suspending.load(Ordering::Relaxed) {
                         break;
                     }
                     sleep(Duration::from_millis(200)).await;
                 }
-                if shutdown.load(Ordering::Relaxed) {
+                if shutdown.load(Ordering::Relaxed) || suspending.load(Ordering::Relaxed) {
                     break;
                 }
 
@@ -1401,7 +1405,7 @@ async fn main() -> Result<()> {
             }
         } // end drain loop
 
-        if is_last || shutdown.load(Ordering::Relaxed) {
+        if is_last || shutdown.load(Ordering::Relaxed) || suspending.load(Ordering::Relaxed) {
             break;
         }
 
@@ -1413,6 +1417,47 @@ async fn main() -> Result<()> {
     if shutdown.load(Ordering::Relaxed) && !last_timestamp.is_empty() {
         log!("Stopped at timestamp {last_timestamp}");
     }
+
+    if suspending.load(Ordering::Relaxed) {
+        if last_timestamp.is_empty() {
+            log!("Nothing to suspend yet — no timestamps processed.");
+        } else {
+            let state = SuspendState {
+                version: 1,
+                suspended_at: chrono::Local::now().to_rfc3339(),
+                apex: apex.clone(),
+                args: SavedArgs {
+                    url: url.clone(),
+                    output: output.clone(),
+                    verbose,
+                    include_exact_copies,
+                    after: after.clone(),
+                    before: before.clone(),
+                },
+                last_timestamp: last_timestamp.clone(),
+                current_delay_ms,
+                failed_urls: failed_urls.clone(),
+                memo: memo.clone(),
+                ts_done,
+                downloaded,
+                linked,
+                skipped,
+                errors,
+                discovered,
+                total_bytes,
+                total_saved,
+            };
+            match save_suspend_state(&cache_dir, &state) {
+                Ok(path) => {
+                    let path_str = path.display().to_string();
+                    log!("Suspended — resume with: wayback-scraper --resume-file {path_str}");
+                    println!("{path_str}");
+                }
+                Err(e) => log!("[ERROR] Failed to save suspend state: {e:#}"),
+            }
+        }
+    }
+
     log!(
         "Done.  timestamps={ts_done}  cdx={cdx_count}  discovered={discovered}  \
          downloaded={downloaded}  linked={linked}  skipped={skipped}  errors={errors}  \
