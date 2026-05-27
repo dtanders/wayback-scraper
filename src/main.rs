@@ -39,6 +39,9 @@ const MIN_REQUEST_DELAY_MS: u64 = 250;
 /// Maximum inter-request delay the adaptive throttle will reach.
 const MAX_REQUEST_DELAY_MS: u64 = 4_000;
 
+/// How much to reduce the inter-request delay after each successful response.
+const DELAY_DECAY_MS: u64 = 25;
+
 /// Nominal request rate derived from the minimum delay.
 const REQUEST_RATE: u64 = 1_000 / MIN_REQUEST_DELAY_MS;
 
@@ -791,13 +794,11 @@ fn ensure_dir_all(path: &Path) -> Result<()> {
         fs::rename(path, &tmp)
             .with_context(|| format!("rename {} for promotion", path.display()))?;
         fs::create_dir(path).with_context(|| format!("mkdir {}", path.display()))?;
-        fs::rename(&tmp, path.join("index.html"))
-            .with_context(|| format!("promote {} to index.html", path.display()))?;
-    } else {
-        fs::create_dir(path).with_context(|| format!("mkdir {}", path.display()))?;
+        return fs::rename(&tmp, path.join("index.html"))
+            .with_context(|| format!("promote {} to index.html", path.display()));
     }
 
-    Ok(())
+    fs::create_dir(path).with_context(|| format!("mkdir {}", path.display()))
 }
 
 fn write_file(dest: &Path, bytes: &[u8], existing: &mut HashSet<PathBuf>) -> Result<()> {
@@ -1308,8 +1309,9 @@ async fn main() -> Result<()> {
                 {
                     Ok(SnapshotOutcome::Downloaded(bytes)) => {
                         consecutive_blocks = 0;
-                        current_delay_ms =
-                            (current_delay_ms.saturating_sub(25)).max(MIN_REQUEST_DELAY_MS);
+                        current_delay_ms = current_delay_ms
+                            .saturating_sub(DELAY_DECAY_MS)
+                            .max(MIN_REQUEST_DELAY_MS);
                         ts_dl += 1;
                         ts_bytes += bytes.len() as u64;
                         enqueue_links(&bytes);
@@ -1323,8 +1325,9 @@ async fn main() -> Result<()> {
                     }
                     Ok(SnapshotOutcome::Hardlinked(bytes, saved)) => {
                         consecutive_blocks = 0;
-                        current_delay_ms =
-                            (current_delay_ms.saturating_sub(25)).max(MIN_REQUEST_DELAY_MS);
+                        current_delay_ms = current_delay_ms
+                            .saturating_sub(DELAY_DECAY_MS)
+                            .max(MIN_REQUEST_DELAY_MS);
                         ts_linked += 1;
                         ts_saved += saved;
                         enqueue_links(&bytes);
@@ -1335,8 +1338,9 @@ async fn main() -> Result<()> {
                     }
                     Ok(SnapshotOutcome::Skipped) => {
                         consecutive_blocks = 0;
-                        current_delay_ms =
-                            (current_delay_ms.saturating_sub(25)).max(MIN_REQUEST_DELAY_MS);
+                        current_delay_ms = current_delay_ms
+                            .saturating_sub(DELAY_DECAY_MS)
+                            .max(MIN_REQUEST_DELAY_MS);
                         ts_skip += 1;
                         sleep(Duration::from_millis(current_delay_ms)).await;
                     }
