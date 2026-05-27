@@ -3,10 +3,16 @@ use chrono::Local;
 use clap::Parser;
 
 macro_rules! log {
-    () => { eprintln!() };
-    ($($arg:tt)*) => {
-        eprintln!("[{}] {}", Local::now().format("%H:%M:%S"), format_args!($($arg)*))
-    };
+    () => {{
+        if *IS_TTY { eprint!("\r\x1b[K"); }
+        eprintln!();
+        if *IS_TTY { eprint!("{}", CONTROLS_HINT); }
+    }};
+    ($($arg:tt)*) => {{
+        if *IS_TTY { eprint!("\r\x1b[K"); }
+        eprintln!("[{}] {}", Local::now().format("%H:%M:%S"), format_args!($($arg)*));
+        if *IS_TTY { eprint!("{}", CONTROLS_HINT); }
+    }};
 }
 use lol_html::{comments, element, HtmlRewriter, Settings};
 use regex::Regex;
@@ -55,6 +61,13 @@ const CIRCUIT_BREAKER_MAX_TRIPS: u32 = 3;
 
 /// CDX records per API page.
 const CDX_PAGE_SIZE: u32 = 10_000;
+
+static IS_TTY: LazyLock<bool> = LazyLock::new(|| {
+    use std::io::IsTerminal;
+    std::io::stderr().is_terminal()
+});
+
+const CONTROLS_HINT: &str = "  p=pause  r=resume  s=suspend  ^C=quit";
 
 // ─── Regexes ─────────────────────────────────────────────────────────────────
 
@@ -1466,6 +1479,10 @@ async fn main() -> Result<()> {
             format_bytes(total_bytes),
             format_bytes(total_saved)
         );
+    }
+
+    if *IS_TTY {
+        eprint!("\r\x1b[K");
     }
 
     Ok(())
