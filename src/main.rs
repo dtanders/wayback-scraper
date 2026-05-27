@@ -1389,13 +1389,10 @@ async fn main() -> Result<()> {
                     );
                 }
 
-                if shutdown.load(Ordering::Relaxed) || suspending.load(Ordering::Relaxed) {
-                    break;
-                }
-                while paused.load(Ordering::Relaxed) {
-                    if shutdown.load(Ordering::Relaxed) || suspending.load(Ordering::Relaxed) {
-                        break;
-                    }
+                while paused.load(Ordering::Relaxed)
+                    && !shutdown.load(Ordering::Relaxed)
+                    && !suspending.load(Ordering::Relaxed)
+                {
                     sleep(Duration::from_millis(200)).await;
                 }
                 if shutdown.load(Ordering::Relaxed) || suspending.load(Ordering::Relaxed) {
