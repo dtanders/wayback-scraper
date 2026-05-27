@@ -1261,19 +1261,6 @@ async fn main() -> Result<()> {
             }
 
             while let Some(orig_url) = queue.pop_front() {
-                if shutdown.load(Ordering::Relaxed) || suspending.load(Ordering::Relaxed) {
-                    break;
-                }
-                while paused.load(Ordering::Relaxed) {
-                    if shutdown.load(Ordering::Relaxed) || suspending.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    sleep(Duration::from_millis(200)).await;
-                }
-                if shutdown.load(Ordering::Relaxed) || suspending.load(Ordering::Relaxed) {
-                    break;
-                }
-
                 ts_processed += 1;
 
                 if !matches_domain(&orig_url, &apex) {
@@ -1394,12 +1381,25 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                if !verbose && ts_processed.is_multiple_of(50) && !paused.load(Ordering::Relaxed) {
+                if !verbose && ts_processed.is_multiple_of(50) {
                     log!(
                         "  … {ts_processed} processed, {} queued  \
                         dl={ts_dl} linked={ts_linked} skip={ts_skip} err={ts_err} disc={ts_disc} in {timestamp}",
                         queue.len()
                     );
+                }
+
+                if shutdown.load(Ordering::Relaxed) || suspending.load(Ordering::Relaxed) {
+                    break;
+                }
+                while paused.load(Ordering::Relaxed) {
+                    if shutdown.load(Ordering::Relaxed) || suspending.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    sleep(Duration::from_millis(200)).await;
+                }
+                if shutdown.load(Ordering::Relaxed) || suspending.load(Ordering::Relaxed) {
+                    break;
                 }
             }
 
