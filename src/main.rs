@@ -675,7 +675,7 @@ fn pick_suspend_file(dir: &Path) -> Result<PathBuf> {
     }
 
     // Newest first.
-    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.sort_by_key(|f| std::cmp::Reverse(f.1));
 
     if files.len() == 1 {
         let path = files.remove(0).0;
