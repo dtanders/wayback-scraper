@@ -1394,7 +1394,7 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                if !verbose && ts_processed.is_multiple_of(50) {
+                if !verbose && ts_processed.is_multiple_of(50) && !paused.load(Ordering::Relaxed) {
                     log!(
                         "  … {ts_processed} processed, {} queued  \
                         dl={ts_dl} linked={ts_linked} skip={ts_skip} err={ts_err} disc={ts_disc} in {timestamp}",
