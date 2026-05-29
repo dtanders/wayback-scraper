@@ -1,19 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::Local;
 use clap::Parser;
-
-macro_rules! log {
-    () => {{
-        if *IS_TTY { eprint!("\r\x1b[K"); }
-        eprintln!();
-        if *IS_TTY { eprint!("{}", CONTROLS_HINT); }
-    }};
-    ($($arg:tt)*) => {{
-        if *IS_TTY { eprint!("\r\x1b[K"); }
-        eprintln!("[{}] {}", Local::now().format("%H:%M:%S"), format_args!($($arg)*));
-        if *IS_TTY { eprint!("{}", CONTROLS_HINT); }
-    }};
-}
 use lol_html::{comments, element, HtmlRewriter, Settings};
 use regex::Regex;
 use reqwest::Client;
@@ -27,6 +14,19 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::time::sleep;
 use url::Url;
+
+macro_rules! log {
+    () => {{
+        if *IS_TTY { eprint!("\r\x1b[K"); }
+        eprintln!();
+        if *IS_TTY { eprint!("{}", CONTROLS_HINT); }
+    }};
+    ($($arg:tt)*) => {{
+        if *IS_TTY { eprint!("\r\x1b[K"); }
+        eprintln!("[{}] {}", Local::now().format("%H:%M:%S"), format_args!($($arg)*));
+        if *IS_TTY { eprint!("{}", CONTROLS_HINT); }
+    }};
+}
 
 const WAYBACK_CDX: &str = "https://web.archive.org/cdx/search/cdx";
 const WAYBACK_WEB: &str = "https://web.archive.org/web";
@@ -70,7 +70,7 @@ static IS_TTY: LazyLock<bool> = LazyLock::new(|| {
     std::io::stderr().is_terminal()
 });
 
-const CONTROLS_HINT: &str = "  p=pause  r=resume  s=suspend  ^C=quit";
+const CONTROLS_HINT: &str = "  p=pause  r=resume  s=suspend  ^C=quit ";
 
 // ─── Regexes ─────────────────────────────────────────────────────────────────
 
