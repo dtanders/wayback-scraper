@@ -17,12 +17,12 @@ use url::Url;
 
 macro_rules! log {
     () => {{
-        if *IS_TTY { eprint!("\r\x1b[K"); }
+        prepare_log_line();
         eprintln!();
         if *IS_TTY { eprint!("{}", CONTROLS_HINT); }
     }};
     ($($arg:tt)*) => {{
-        if *IS_TTY { eprint!("\r\x1b[K"); }
+        prepare_log_line();
         eprintln!("[{}] {}", Local::now().format("%H:%M:%S"), format_args!($($arg)*));
         if *IS_TTY { eprint!("{}", CONTROLS_HINT); }
     }};
@@ -70,7 +70,24 @@ static IS_TTY: LazyLock<bool> = LazyLock::new(|| {
     std::io::stderr().is_terminal()
 });
 
+/// Set by the stdin task before each log! call so the macro knows the cursor
+/// moved down one line when the user pressed Enter.
+static STDIN_ECHOED: AtomicBool = AtomicBool::new(false);
+
 const CONTROLS_HINT: &str = "  p=pause  r=resume  s=suspend  ^C=quit ";
+
+fn prepare_log_line() {
+    if !*IS_TTY {
+        return;
+    }
+    if STDIN_ECHOED.swap(false, Ordering::Relaxed) {
+        // Enter moved the cursor past the hint line; clear the empty current
+        // line, then move up and clear the dirty hint+input line above it.
+        eprint!("\r\x1b[K\x1b[1A\r\x1b[K");
+    } else {
+        eprint!("\r\x1b[K");
+    }
+}
 
 // ─── Regexes ─────────────────────────────────────────────────────────────────
 
@@ -1044,7 +1061,7 @@ async fn main() -> Result<()> {
         "Controls: 'p' + Enter to pause  |  'r' + Enter to resume  |  \
          's' + Enter to suspend  |  Ctrl+C to stop"
     );
-    eprintln!();
+    log!();
 
     fs::create_dir_all(&output)
         .with_context(|| format!("could not create output directory: {}", output.display()))?;
@@ -1089,7 +1106,7 @@ async fn main() -> Result<()> {
             "Resume: {} files already on disk (skipping via index)",
             existing.len()
         );
-        eprintln!();
+        log!();
     }
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -1114,14 +1131,17 @@ async fn main() -> Result<()> {
                 match line.trim() {
                     "p" => {
                         paused.store(true, Ordering::Relaxed);
+                        STDIN_ECHOED.store(true, Ordering::Relaxed);
                         log!("Paused — send 'r' to resume");
                     }
                     "r" => {
                         paused.store(false, Ordering::Relaxed);
+                        STDIN_ECHOED.store(true, Ordering::Relaxed);
                         log!("Resumed");
                     }
                     "s" => {
                         suspending.store(true, Ordering::Relaxed);
+                        STDIN_ECHOED.store(true, Ordering::Relaxed);
                         log!("Suspending — finishing current download…");
                     }
                     _ => {}
@@ -1185,7 +1205,7 @@ async fn main() -> Result<()> {
                 );
             }
             log!("CDX entries found : {}", pairs.len());
-            eprintln!();
+            log!();
             (pairs, true)
         } else {
             let page = fetch_cdx_page(
@@ -1427,7 +1447,7 @@ async fn main() -> Result<()> {
         sleep(Duration::from_millis(MIN_REQUEST_DELAY_MS)).await;
     } // end CDX page loop
 
-    eprintln!();
+    log!();
     if shutdown.load(Ordering::Relaxed) && !last_timestamp.is_empty() {
         log!("Stopped at timestamp {last_timestamp}");
     }
