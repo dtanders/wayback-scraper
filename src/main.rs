@@ -60,7 +60,7 @@ const CIRCUIT_BREAKER_THRESHOLD: u32 = 5;
 const CIRCUIT_BREAKER_COOLDOWN_MS: u64 = 60_000;
 
 /// Pause the run after the circuit opens this many times without recovery.
-const CIRCUIT_BREAKER_MAX_TRIPS: u32 = 3;
+const CIRCUIT_BREAKER_MAX_TRIPS: u32 = 4;
 
 /// CDX records per API page.
 const CDX_PAGE_SIZE: u32 = 10_000;
@@ -1368,7 +1368,6 @@ async fn main() -> Result<()> {
                         consecutive_blocks += 1;
                         ts_err += 1;
                         current_delay_ms = (current_delay_ms * 2).min(MAX_REQUEST_DELAY_MS);
-                        log!("[THROTTLE] backing off to {current_delay_ms}ms inter-request delay");
                         if consecutive_blocks >= CIRCUIT_BREAKER_THRESHOLD {
                             circuit_trips += 1;
                             if circuit_trips >= CIRCUIT_BREAKER_MAX_TRIPS {
@@ -1380,20 +1379,24 @@ async fn main() -> Result<()> {
                                 circuit_trips = 0;
                                 consecutive_blocks = 0;
                                 current_delay_ms = MAX_REQUEST_DELAY_MS / 4;
-                                continue;
+                                // Fall through to the pause check below rather than
+                                // continue-ing past it to the next queue item.
+                            } else {
+                                let cooldown_ms =
+                                    CIRCUIT_BREAKER_COOLDOWN_MS * (1 << (circuit_trips - 1));
+                                log!("[THROTTLE] backing off to {current_delay_ms}ms inter-request delay");
+                                log!(
+                                    "[CIRCUIT BREAKER] trip {circuit_trips}/{CIRCUIT_BREAKER_MAX_TRIPS} \
+                                    — cooling down for {}s",
+                                    cooldown_ms / 1000
+                                );
+                                sleep(Duration::from_millis(cooldown_ms)).await;
+                                consecutive_blocks = 0;
+                                // Resume cautiously rather than at full speed.
+                                current_delay_ms = MAX_REQUEST_DELAY_MS / 4;
                             }
-                            let cooldown_ms =
-                                CIRCUIT_BREAKER_COOLDOWN_MS * (1 << (circuit_trips - 1));
-                            log!(
-                                "[CIRCUIT BREAKER] trip {circuit_trips}/{CIRCUIT_BREAKER_MAX_TRIPS} \
-                                — cooling down for {}s",
-                                cooldown_ms / 1000
-                            );
-                            sleep(Duration::from_millis(cooldown_ms)).await;
-                            consecutive_blocks = 0;
-                            // Resume cautiously rather than at full speed.
-                            current_delay_ms = MAX_REQUEST_DELAY_MS / 4;
                         } else {
+                            log!("[THROTTLE] backing off to {current_delay_ms}ms inter-request delay");
                             sleep(Duration::from_millis(current_delay_ms)).await;
                         }
                     }
