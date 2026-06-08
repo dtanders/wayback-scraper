@@ -1509,7 +1509,9 @@ async fn main() -> Result<()> {
         eprint!("\r\x1b[K");
     }
 
-    Ok(())
+    // The stdin task blocks an OS thread that won't unblock until the process
+    // exits, so force an immediate clean exit rather than waiting for it.
+    std::process::exit(0);
 }
 
 #[cfg(test)]
