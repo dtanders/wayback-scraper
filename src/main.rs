@@ -997,6 +997,27 @@ async fn download_snapshot(
     Ok(SnapshotOutcome::Downloaded(raw))
 }
 
+/// Pure step of `decay_delay`, split out so the arithmetic is testable
+/// without exercising the `log!` macro's `Local::now()` call.
+fn decayed_delay(current_delay_ms: u64) -> u64 {
+    current_delay_ms
+        .saturating_sub(DELAY_DECAY_MS)
+        .max(MIN_REQUEST_DELAY_MS)
+}
+
+/// Decay the adaptive delay after a successful request, logging `[SPEEDUP]`
+/// if it actually eased off from a throttled state.
+fn decay_delay(current_delay_ms: &mut u64) {
+    let before = *current_delay_ms;
+    *current_delay_ms = decayed_delay(before);
+    if *current_delay_ms < before {
+        log!(
+            "[SPEEDUP] easing to {}ms inter-request delay",
+            current_delay_ms
+        );
+    }
+}
+
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -1329,9 +1350,7 @@ async fn main() -> Result<()> {
                 {
                     Ok(SnapshotOutcome::Downloaded(bytes)) => {
                         consecutive_blocks = 0;
-                        current_delay_ms = current_delay_ms
-                            .saturating_sub(DELAY_DECAY_MS)
-                            .max(MIN_REQUEST_DELAY_MS);
+                        decay_delay(&mut current_delay_ms);
                         ts_dl += 1;
                         ts_bytes += bytes.len() as u64;
                         enqueue_links(&bytes);
@@ -1345,9 +1364,7 @@ async fn main() -> Result<()> {
                     }
                     Ok(SnapshotOutcome::Hardlinked(bytes, saved)) => {
                         consecutive_blocks = 0;
-                        current_delay_ms = current_delay_ms
-                            .saturating_sub(DELAY_DECAY_MS)
-                            .max(MIN_REQUEST_DELAY_MS);
+                        decay_delay(&mut current_delay_ms);
                         ts_linked += 1;
                         ts_saved += saved;
                         enqueue_links(&bytes);
@@ -1358,9 +1375,7 @@ async fn main() -> Result<()> {
                     }
                     Ok(SnapshotOutcome::Skipped) => {
                         consecutive_blocks = 0;
-                        current_delay_ms = current_delay_ms
-                            .saturating_sub(DELAY_DECAY_MS)
-                            .max(MIN_REQUEST_DELAY_MS);
+                        decay_delay(&mut current_delay_ms);
                         ts_skip += 1;
                         sleep(Duration::from_millis(current_delay_ms)).await;
                     }
@@ -1779,6 +1794,23 @@ mod tests {
         assert_eq!(backoff_ms(2), 3_000); // 2000 * 1.5^1
         assert_eq!(backoff_ms(3), 4_500); // 2000 * 1.5^2
         assert_eq!(backoff_ms(4), 6_750); // 2000 * 1.5^3
+    }
+
+    // ── decayed_delay ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn decayed_delay_reduces_by_step() {
+        assert_eq!(decayed_delay(500), 475);
+    }
+
+    #[test]
+    fn decayed_delay_floors_at_minimum() {
+        assert_eq!(
+            decayed_delay(MIN_REQUEST_DELAY_MS + 10),
+            MIN_REQUEST_DELAY_MS
+        );
+        // Already at the floor — stays put.
+        assert_eq!(decayed_delay(MIN_REQUEST_DELAY_MS), MIN_REQUEST_DELAY_MS);
     }
 
     // ── rewrite_url ───────────────────────────────────────────────────────────
