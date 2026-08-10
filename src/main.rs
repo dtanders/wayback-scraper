@@ -1006,13 +1006,13 @@ fn decayed_delay(current_delay_ms: u64) -> u64 {
 }
 
 /// Decay the adaptive delay after a successful request, logging `[SPEEDUP]`
-/// if it actually eased off from a throttled state.
+/// once it fully recovers to the floor after having been throttled.
 fn decay_delay(current_delay_ms: &mut u64) {
     let before = *current_delay_ms;
     *current_delay_ms = decayed_delay(before);
-    if *current_delay_ms < before {
+    if *current_delay_ms == MIN_REQUEST_DELAY_MS && before > MIN_REQUEST_DELAY_MS {
         log!(
-            "[SPEEDUP] easing to {}ms inter-request delay",
+            "[SPEEDUP] back to full speed at {}ms inter-request delay",
             current_delay_ms
         );
     }
