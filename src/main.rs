@@ -515,6 +515,38 @@ fn extract_links(content: &[u8], base_url: &str, apex: &str) -> Vec<String> {
 
 // ─── HTTP helpers ─────────────────────────────────────────────────────────────
 
+/// True for IO error kinds indicating the peer reset or closed the
+/// connection mid-request (e.g. Windows os error 10054 / Unix ECONNRESET) —
+/// safe to retry since every request we send is a GET.
+fn is_transient_io_error(kind: std::io::ErrorKind) -> bool {
+    use std::io::ErrorKind::*;
+    matches!(
+        kind,
+        ConnectionReset | ConnectionAborted | BrokenPipe | UnexpectedEof
+    )
+}
+
+/// True for network errors worth retrying. Beyond `is_connect()` /
+/// `is_timeout()`, this walks the error's source chain looking for a
+/// transient IO error — connection resets on a pooled keep-alive connection
+/// surface as a "request" error (not "connect"), since the connection had
+/// already been established when the peer closed it.
+fn is_transient(e: &reqwest::Error) -> bool {
+    if e.is_connect() || e.is_timeout() {
+        return true;
+    }
+    let mut source = std::error::Error::source(e);
+    while let Some(err) = source {
+        if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+            if is_transient_io_error(io_err.kind()) {
+                return true;
+            }
+        }
+        source = err.source();
+    }
+    false
+}
+
 fn backoff_ms(attempt: u32) -> u64 {
     let mut ms = RETRY_BASE_MS;
     for _ in 1..attempt {
@@ -535,7 +567,7 @@ async fn send_with_retry(
     loop {
         match client.get(url).send().await {
             Ok(r) => return Ok(r),
-            Err(e) if attempt < MAX_RETRIES && (e.is_connect() || e.is_timeout()) => {
+            Err(e) if attempt < MAX_RETRIES && is_transient(&e) => {
                 attempt += 1;
                 let ms = backoff_ms(attempt);
                 log!("[RETRY {attempt}/{MAX_RETRIES}] {tag} — {e} — waiting {ms}ms");
@@ -899,7 +931,7 @@ async fn download_snapshot(
 
     let resp = match send_with_retry(client, &wayback_url, orig_url).await {
         Ok(r) => r,
-        Err(e) if e.is_connect() || e.is_timeout() => {
+        Err(e) if is_transient(&e) => {
             log!("[BLOCKED] {wayback_url}");
             return Ok(SnapshotOutcome::Blocked);
         }
@@ -1794,6 +1826,25 @@ mod tests {
         assert_eq!(backoff_ms(2), 3_000); // 2000 * 1.5^1
         assert_eq!(backoff_ms(3), 4_500); // 2000 * 1.5^2
         assert_eq!(backoff_ms(4), 6_750); // 2000 * 1.5^3
+    }
+
+    // ── is_transient_io_error ────────────────────────────────────────────────
+
+    #[test]
+    fn is_transient_io_error_matches_reset_like_kinds() {
+        use std::io::ErrorKind::*;
+        assert!(is_transient_io_error(ConnectionReset));
+        assert!(is_transient_io_error(ConnectionAborted));
+        assert!(is_transient_io_error(BrokenPipe));
+        assert!(is_transient_io_error(UnexpectedEof));
+    }
+
+    #[test]
+    fn is_transient_io_error_rejects_other_kinds() {
+        use std::io::ErrorKind::*;
+        assert!(!is_transient_io_error(NotFound));
+        assert!(!is_transient_io_error(PermissionDenied));
+        assert!(!is_transient_io_error(InvalidData));
     }
 
     // ── decayed_delay ─────────────────────────────────────────────────────────
