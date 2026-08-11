@@ -877,6 +877,65 @@ enum SnapshotOutcome {
     Blocked,
 }
 
+/// Outcome of fetching one Wayback snapshot's HTTP response.
+enum FetchOutcome {
+    /// All retries were exhausted due to a connection error (IP block).
+    Blocked,
+    /// Got a non-2xx HTTP response.
+    Status(reqwest::StatusCode),
+    /// 2xx response with its status code, content-type header, and full body.
+    Success {
+        status: reqwest::StatusCode,
+        content_type: String,
+        bytes: Vec<u8>,
+    },
+}
+
+/// Send `wayback_url` and read its full body, retrying the *entire
+/// request* (not just the initial send) if a transient error interrupts
+/// downloading the body — once `.bytes()` fails partway through, the
+/// response can't be resumed, so the whole GET is reissued via
+/// `send_with_retry`.
+async fn fetch_snapshot(client: &Client, wayback_url: &str, tag: &str) -> Result<FetchOutcome> {
+    let mut attempt = 0u32;
+    loop {
+        let resp = match send_with_retry(client, wayback_url, tag).await {
+            Ok(r) => r,
+            Err(e) if is_transient(&e) => return Ok(FetchOutcome::Blocked),
+            Err(e) => return Err(e).with_context(|| format!("request failed: {wayback_url}")),
+        };
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Ok(FetchOutcome::Status(status));
+        }
+
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_lowercase();
+
+        match resp.bytes().await {
+            Ok(bytes) => {
+                return Ok(FetchOutcome::Success {
+                    status,
+                    content_type,
+                    bytes: bytes.to_vec(),
+                })
+            }
+            Err(e) if attempt < MAX_RETRIES && is_transient(&e) => {
+                attempt += 1;
+                let ms = backoff_ms(attempt);
+                log!("[RETRY {attempt}/{MAX_RETRIES}] {tag} (body) — {e} — waiting {ms}ms");
+                sleep(Duration::from_millis(ms)).await;
+            }
+            Err(e) => return Err(e).context("failed reading response body"),
+        }
+    }
+}
+
 /// Fetch a single Wayback snapshot, rewrite internal URLs to relative local
 /// paths, and write the result to `output/<ts>/<rel_path>`.
 #[allow(clippy::too_many_arguments)]
@@ -929,39 +988,26 @@ async fn download_snapshot(
         log!("[FETCH] {wayback_url}");
     }
 
-    let resp = match send_with_retry(client, &wayback_url, orig_url).await {
-        Ok(r) => r,
-        Err(e) if is_transient(&e) => {
+    let (status, content_type, raw) = match fetch_snapshot(client, &wayback_url, orig_url).await? {
+        FetchOutcome::Blocked => {
             log!("[BLOCKED] {wayback_url}");
             return Ok(SnapshotOutcome::Blocked);
         }
-        Err(e) => return Err(e).with_context(|| format!("request failed: {wayback_url}")),
-    };
-
-    let status = resp.status();
-
-    if !status.is_success() {
-        log!("[{status}] {wayback_url}");
-        if status.is_client_error() {
-            failed_urls.insert(wayback_url);
-            return Ok(SnapshotOutcome::Skipped);
-        } else {
-            return Ok(SnapshotOutcome::ServerError);
+        FetchOutcome::Status(status) => {
+            log!("[{status}] {wayback_url}");
+            if status.is_client_error() {
+                failed_urls.insert(wayback_url);
+                return Ok(SnapshotOutcome::Skipped);
+            } else {
+                return Ok(SnapshotOutcome::ServerError);
+            }
         }
-    }
-
-    let content_type = resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_lowercase();
-
-    let raw = resp
-        .bytes()
-        .await
-        .context("failed reading response body")?
-        .to_vec();
+        FetchOutcome::Success {
+            status,
+            content_type,
+            bytes,
+        } => (status, content_type, bytes),
+    };
 
     // Rewrite same-domain URLs to relative local paths before saving.
     let is_html = content_type.contains("text/html") || looks_like_html(&raw);
