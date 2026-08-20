@@ -785,32 +785,34 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
 
 // ─── Filesystem helpers ───────────────────────────────────────────────────────
 
-/// Walk `output` and collect every regular file under 14-digit timestamp
-/// directories into a set.  Used once at startup so resume skips can be done
-/// as O(1) hash-set lookups instead of per-file stat calls.
-fn scan_existing_files(output: &Path) -> Result<HashSet<PathBuf>> {
-    let mut existing = HashSet::new();
-    let Ok(entries) = fs::read_dir(output) else {
-        return Ok(existing);
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.len() == 14 && name.bytes().all(|b| b.is_ascii_digit()) {
-            collect_files_recursive(&path, &mut existing)?;
-        }
+/// Collect every regular file under `output/<timestamp>/` into `existing`
+/// so resume skips can be done as O(1) hash-set lookups instead of per-file
+/// stat calls.  Called lazily when a timestamp is first processed, so only
+/// directories the run actually touches are ever walked — timestamps filtered
+/// out by resume or --after/--before cost nothing.  A missing directory is
+/// fine (nothing downloaded for that timestamp yet).
+///
+/// Cross-timestamp knowledge is never needed here: dedup hard links consult
+/// `memo` (URL → source path), not `existing`.
+fn scan_timestamp_dir(
+    output: &Path,
+    timestamp: &str,
+    existing: &mut HashSet<PathBuf>,
+) -> Result<()> {
+    let dir = output.join(ts_to_dir(timestamp));
+    if !dir.is_dir() {
+        return Ok(());
     }
-    Ok(existing)
+    collect_files_recursive(&dir, existing)
 }
 
 fn collect_files_recursive(dir: &Path, set: &mut HashSet<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(dir)?.flatten() {
+        // file_type() comes from the directory listing itself — unlike
+        // path.is_dir(), it costs no extra metadata syscall per entry.
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         let path = entry.path();
-        if path.is_dir() {
+        if is_dir {
             collect_files_recursive(&path, set)?;
         } else {
             set.insert(path);
@@ -1198,15 +1200,10 @@ async fn main() -> Result<()> {
         );
     }
 
-    log!("Scanning output directory for existing files…");
-    let mut existing = scan_existing_files(&output).context("failed to scan existing files")?;
-    if !existing.is_empty() {
-        log!(
-            "Resume: {} files already on disk (skipping via index)",
-            existing.len()
-        );
-        log!();
-    }
+    // Files already on disk, discovered lazily: each timestamp's directory is
+    // walked once, right before that timestamp is processed.
+    let mut existing: HashSet<PathBuf> = HashSet::new();
+    let mut scanned_ts: HashSet<String> = HashSet::new();
 
     let shutdown = Arc::new(AtomicBool::new(false));
     {
@@ -1360,6 +1357,16 @@ async fn main() -> Result<()> {
             }
             let (timestamp, cdx_urls) = by_timestamp.pop_first().unwrap();
             last_timestamp.clone_from(&timestamp);
+
+            if scanned_ts.insert(timestamp.clone()) {
+                let before = existing.len();
+                scan_timestamp_dir(&output, &timestamp, &mut existing)
+                    .with_context(|| format!("scan existing files for {timestamp}"))?;
+                let found = existing.len() - before;
+                if verbose && found > 0 {
+                    log!("[SCAN] {timestamp}: {found} files already on disk");
+                }
+            }
 
             ts_done += 1;
 
@@ -2241,5 +2248,51 @@ mod tests {
         assert_eq!(loaded.ts_done, 1);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ── scan_timestamp_dir ────────────────────────────────────────────────────
+    // Excluded from Miri: real filesystem + SystemTime::now() nonce.
+
+    #[cfg(not(miri))]
+    fn temp_output(tag: &str) -> PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        std::env::temp_dir().join(format!("wayback_test_{tag}_{nonce}"))
+    }
+
+    #[cfg(not(miri))]
+    #[test]
+    fn scan_timestamp_dir_collects_only_that_timestamp() {
+        let out = temp_output("scan_one_ts");
+        std::fs::create_dir_all(out.join("20200101000000").join("sub")).unwrap();
+        std::fs::create_dir_all(out.join("20210101000000")).unwrap();
+        std::fs::write(out.join("20200101000000").join("a.html"), b"a").unwrap();
+        std::fs::write(out.join("20200101000000").join("sub").join("b.css"), b"b").unwrap();
+        std::fs::write(out.join("20210101000000").join("c.html"), b"c").unwrap();
+
+        let mut existing = HashSet::new();
+        scan_timestamp_dir(&out, "20200101000000", &mut existing).unwrap();
+
+        assert!(existing.contains(&out.join("20200101000000").join("a.html")));
+        assert!(existing.contains(&out.join("20200101000000").join("sub").join("b.css")));
+        assert_eq!(existing.len(), 2, "other timestamps must not be scanned");
+
+        std::fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[cfg(not(miri))]
+    #[test]
+    fn scan_timestamp_dir_missing_dir_is_empty_ok() {
+        let out = temp_output("scan_missing");
+        std::fs::create_dir_all(&out).unwrap();
+
+        let mut existing = HashSet::new();
+        scan_timestamp_dir(&out, "20200101000000", &mut existing).unwrap();
+        assert!(existing.is_empty());
+
+        std::fs::remove_dir_all(&out).unwrap();
     }
 }
