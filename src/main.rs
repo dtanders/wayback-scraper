@@ -121,6 +121,7 @@ rate-limited to roughly {REQUEST_RATE} per second, backing off automatically if 
 #[derive(Parser, Debug)]
 #[command(
     name = "wayback-scraper",
+    version,
     about = "Create locally browsable snapshots of a site from the Internet Archive"
 )]
 struct Args {
@@ -2248,6 +2249,15 @@ mod tests {
         assert_eq!(loaded.ts_done, 1);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ── CLI ───────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cli_reports_crate_version() {
+        use clap::CommandFactory;
+        let cmd = Args::command();
+        assert_eq!(cmd.get_version(), Some(env!("CARGO_PKG_VERSION")));
     }
 
     // ── scan_timestamp_dir ────────────────────────────────────────────────────
